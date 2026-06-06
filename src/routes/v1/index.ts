@@ -14,7 +14,7 @@ import {
 import { supabase } from "@/services/supabase/client";
 import Elysia from "elysia";
 
-export const apiV1 = new Elysia().group("v1/", (app) =>
+export const apiV1 = new Elysia().group("v1", (app) =>
   app
     .use(publicTestingRoutes)
     .use(userRoutes)
