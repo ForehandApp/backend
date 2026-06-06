@@ -6,7 +6,7 @@ CREATE TYPE "playing_hand_enum" AS ENUM('left', 'right');--> statement-breakpoin
 CREATE TYPE "set_state_enum" AS ENUM('not_started', 'in_progress', 'completed');--> statement-breakpoint
 CREATE TYPE "side_switch_enum" AS ENUM('per_set', 'half_set', 'no_switch');--> statement-breakpoint
 CREATE TYPE "team_actions_enum" AS ENUM('rejected', 'disqualified', 'reverted');--> statement-breakpoint
-CREATE TYPE "team_status_enum" AS ENUM('registered', 'participating', 'rejected', 'disqualified');--> statement-breakpoint
+CREATE TYPE "team_status_enum" AS ENUM('created', 'registered', 'participating', 'rejected', 'disqualified', 'eliminated');--> statement-breakpoint
 CREATE TYPE "tournament_state_enum" AS ENUM('drafted', 'published', 'in_progress', 'completed', 'cancelled');--> statement-breakpoint
 CREATE TYPE "volunteer_role_enum" AS ENUM('admin', 'scorer');--> statement-breakpoint
 CREATE TABLE "event_formats_table" (
@@ -159,7 +159,7 @@ CREATE TABLE "team_table_table" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
 	"team_status" "team_status_enum" DEFAULT 'registered'::"team_status_enum" NOT NULL,
 	"team_type_id" integer NOT NULL,
-	"event_id" uuid NOT NULL,
+	"event_id" uuid,
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp NOT NULL
 );

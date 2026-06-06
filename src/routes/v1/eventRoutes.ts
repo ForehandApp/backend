@@ -383,8 +383,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
       async ({ db, params: { eventId } }) => {
         try {
           const event = await db.query.eventTable.findFirst({
-            where: ((table: any, { eq }: any) =>
-              eq(table.id, eventId)) as any,
+            where: ((table: any, { eq }: any) => eq(table.id, eventId)) as any,
             with: {
               tournament: true,
               teams: {

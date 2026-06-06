@@ -1,7 +1,7 @@
 {
   "version": "8",
   "dialect": "postgres",
-  "id": "dc6a64bf-1ce6-4077-b300-2f007058e06f",
+  "id": "d00c86a9-e723-4ef0-a113-7e81f3754ea8",
   "prevIds": [
     "00000000-0000-0000-0000-000000000000"
   ],
@@ -93,10 +93,12 @@
     },
     {
       "values": [
+        "created",
         "registered",
         "participating",
         "rejected",
-        "disqualified"
+        "disqualified",
+        "eliminated"
       ],
       "name": "team_status_enum",
       "entityType": "enums",
@@ -1487,7 +1489,7 @@
     {
       "type": "uuid",
       "typeSchema": null,
-      "notNull": true,
+      "notNull": false,
       "dimensions": 0,
       "default": null,
       "generated": null,
