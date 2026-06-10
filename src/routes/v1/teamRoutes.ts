@@ -295,20 +295,6 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           });
         }
 
-        const member = await db.query.organizationMemberTable.findFirst({
-          where: {
-            organizationId: team.event.tournament.organizationId,
-            userId: user.id,
-          },
-        });
-
-        if (!member) {
-          return sendResponse({
-            success: false,
-            message: "You are not eligible to update this team state",
-          });
-        }
-
         await db
           .update(teamTable)
           .set({ teamStatus: body.state })
