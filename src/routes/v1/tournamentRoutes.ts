@@ -1,4 +1,4 @@
-import { protectedApi } from "@/controller";
+import { protectedApi } from "@/routes/v1/controller";
 import {
   eventInvitesTable,
   eventTable,
@@ -125,7 +125,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             const matches = event.matches ?? [];
 
             const enrolledParticipants = teams.reduce(
-              (sum: number, team: any) => sum + (team.participants?.length ?? 0),
+              (sum: number, team: any) =>
+                sum + (team.participants?.length ?? 0),
               0,
             );
 
@@ -140,7 +141,10 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             const liveMatches = matches.filter(
               (m: any) => m.matchState === "in_progress",
             ).length;
-            const remainingMatches = Math.max(totalMatches - completedMatches, 0);
+            const remainingMatches = Math.max(
+              totalMatches - completedMatches,
+              0,
+            );
 
             let stageText = "Registrations Open";
             if (event.eventState === "scheduled") {

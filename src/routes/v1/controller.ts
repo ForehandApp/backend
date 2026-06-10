@@ -1,9 +1,9 @@
 import cors from "@elysiajs/cors";
 import Elysia from "elysia";
-import { supabase } from "./services/supabase/client";
-import { db } from "./services/db/client";
+import { supabase } from "@/services/supabase/client";
+import { db } from "@/services/db/client";
 import { logger } from "@rasla/logify";
-import { sendResponse } from "./utils/response";
+import { sendResponse } from "@/utils/response";
 
 const baseApi = new Elysia()
   .use(logger())
@@ -37,11 +37,7 @@ const baseApi = new Elysia()
     });
   });
 
-export const publicApi = new Elysia()
-  .use(logger())
-  .use(cors())
-  .decorate("supabase", supabase)
-  .decorate("db", db);
+export const publicApi = baseApi;
 
 export const protectedApi = baseApi
   .derive(async ({ request, supabase, status }) => {

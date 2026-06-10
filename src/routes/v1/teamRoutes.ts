@@ -1,4 +1,4 @@
-import { protectedApi } from "@/controller";
+import { protectedApi } from "@/routes/v1/controller";
 import {
   eventTable,
   matchTable,

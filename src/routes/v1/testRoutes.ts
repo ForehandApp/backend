@@ -1,4 +1,4 @@
-import { protectedApi, publicApi } from "@/controller";
+import { protectedApi, publicApi } from "@/routes/v1/controller";
 import { sendResponse } from "@/utils/response";
 
 export const publicTestingRoutes = publicApi.get("/test/public", () => {

@@ -1,4 +1,4 @@
-import { publicApi } from "@/controller";
+import { publicApi } from "@/routes/v1/controller";
 import { sendResponse } from "@/utils/response";
 
 export const optionsRoutes = publicApi.group("/options", (app) =>
