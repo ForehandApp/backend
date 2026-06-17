@@ -41,6 +41,7 @@ export const optionsRoutes = publicApi.group("/options", (app) =>
     })
     .get("/teamTypes", async ({ db }) => {
       const teamTypes = await db.query.teamTypesTable.findMany();
+      console.log("teamTypes", teamTypes);
 
       return sendResponse({
         success: true,

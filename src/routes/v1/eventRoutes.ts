@@ -47,34 +47,41 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           }
 
           const sport = await db.query.sportsOptionsTable.findFirst({
-            where: ((table: any, { eq }: any) =>
-              eq(table.code, event.sportsOptionCode)) as any,
+            where: {
+              code: event.sportsOptionCode,
+            },
             columns: {
               id: true,
             },
           });
 
           const eventFormat = await db.query.eventFormatsTable.findFirst({
-            where: ((table: any, { eq }: any) =>
-              eq(table.code, event.eventFormatCode)) as any,
+            where: {
+              code: event.eventFormatCode,
+            },
             columns: {
               id: true,
             },
           });
 
           const teamType = await db.query.teamTypesTable.findFirst({
-            where: ((table: any, { eq }: any) =>
-              eq(table.code, event.teamTypeCode)) as any,
+            where: {
+              code: event.teamTypeCode,
+            },
             columns: {
               id: true,
             },
           });
+          console.log(teamType);
+          console.log(event.teamTypeCode);
+          console.log(event.name);
 
           const paymentMode =
             event.paymentModeCode !== null
               ? await db.query.paymentModesTable.findFirst({
-                  where: ((table: any, { eq }: any) =>
-                    eq(table.code, event.paymentModeCode)) as any,
+                  where: {
+                    code: event.paymentModeCode,
+                  },
                   columns: {
                     id: true,
                   },
