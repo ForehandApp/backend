@@ -893,7 +893,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
                 roundNumber: match.roundNumber,
                 teamA: match.teamA,
                 teamB: match.teamB,
-                scorer: match.scorer || user.id,
+                scorer: match.scorer ?? null,
                 matchState: "scheduled",
                 startTime: getDate(match.startTime),
                 setsPerMatchId: match.setsPerMatch || event.setsPerMatch,

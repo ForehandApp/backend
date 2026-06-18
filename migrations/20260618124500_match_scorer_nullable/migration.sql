@@ -1,0 +1,2 @@
+ALTER TABLE "match_table"
+ALTER COLUMN "scorer" DROP NOT NULL;

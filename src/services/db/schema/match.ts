@@ -24,9 +24,7 @@ export const matchTable = pgTable.withRLS("match_table", {
     .notNull()
     .references(() => teamTable.id),
 
-  scorer: uuid("scorer")
-    .notNull()
-    .references(() => profileTable.id),
+  scorer: uuid("scorer").references(() => profileTable.id),
 
   winnerId: uuid("winner_id").references(() => teamTable.id),
 

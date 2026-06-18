@@ -7,7 +7,12 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import { genderEnum, inviteStateEnum, playingHandEnum } from "./enums";
+import {
+  genderEnum,
+  inviteStateEnum,
+  playingHandEnum,
+  volunteerRoleEnum,
+} from "./enums";
 import { createdAt, updatedAt } from "./common";
 import { inviteTypeTable } from "./lookups";
 import { organizationTable } from "./organization";
@@ -86,6 +91,7 @@ export const tournamentInvitesTable = pgTable.withRLS(
     tournamentId: uuid("tournament_id")
       .notNull()
       .references(() => tournamentTable.id),
+    role: volunteerRoleEnum("role").notNull().default("admin"),
   },
   (table) => [primaryKey({ columns: [table.inviteId, table.tournamentId] })],
 );

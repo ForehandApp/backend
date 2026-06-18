@@ -10,6 +10,7 @@ import {
   organizationInvitesTable,
   profileTable,
   tournamentInvitesTable,
+  tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
 import { and, desc, eq } from "drizzle-orm";
@@ -73,6 +74,7 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           await db.insert(tournamentInvitesTable).values({
             inviteId: createdInvite.id,
             tournamentId: body.tournamentId,
+            role: body.role,
           });
 
           return sendResponse({
@@ -437,11 +439,24 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
     .post(
       "/tournament/crew",
       async ({ db, body }) => {
+        const volunteerRows = await db
+          .select({
+            userId: tournamentVolunteerTable.userId,
+            role: tournamentVolunteerTable.role,
+          })
+          .from(tournamentVolunteerTable)
+          .where(eq(tournamentVolunteerTable.tournamentId, body.tournamentId));
+
+        const volunteerRoleByUserId = new Map(
+          volunteerRows.map((row) => [row.userId, row.role]),
+        );
+
         const rows = await db
           .select({
             inviteId: invitesTable.id,
             inviteState: invitesTable.inviteState,
             createdAt: invitesTable.createdAt,
+            role: tournamentInvitesTable.role,
             receiverId: profileTable.id,
             receiverName: profileTable.name,
             receiverPhone: profileTable.phone,
@@ -458,7 +473,10 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
 
         const data = rows.map((row) => ({
           id: row.inviteId,
-          role: "admin" as const,
+          role:
+            row.inviteState === "accepted"
+              ? (volunteerRoleByUserId.get(row.receiverId) ?? row.role)
+              : row.role,
           name: row.receiverName,
           phone: row.receiverPhone,
           avatarUrl: row.receiverProfilePicUrl,
@@ -489,6 +507,9 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           .select({
             inviteId: invitesTable.id,
             senderId: invitesTable.senderId,
+            receiverId: invitesTable.receiverId,
+            inviteState: invitesTable.inviteState,
+            role: tournamentInvitesTable.role,
           })
           .from(tournamentInvitesTable)
           .innerJoin(
@@ -527,6 +548,16 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           );
 
         await db.delete(invitesTable).where(eq(invitesTable.id, body.inviteId));
+
+        await db
+          .delete(tournamentVolunteerTable)
+          .where(
+            and(
+              eq(tournamentVolunteerTable.tournamentId, body.tournamentId),
+              eq(tournamentVolunteerTable.userId, row.receiverId),
+              eq(tournamentVolunteerTable.role, row.role),
+            ),
+          );
 
         return sendResponse({
           success: true,
@@ -646,6 +677,37 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
             .where(eq(invitesTable.id, body.inviteId));
 
           if (body.action === "accept" && invite.invteType) {
+            if (invite.invteType.code === "tournament") {
+              const [tournamentInvite] = await tx
+                .select({
+                  tournamentId: tournamentInvitesTable.tournamentId,
+                  role: tournamentInvitesTable.role,
+                })
+                .from(tournamentInvitesTable)
+                .where(eq(tournamentInvitesTable.inviteId, invite.id))
+                .limit(1);
+
+              if (tournamentInvite?.tournamentId) {
+                const existingVolunteer = await tx.query.tournamentVolunteerTable.findFirst(
+                  {
+                    where: {
+                      tournamentId: tournamentInvite.tournamentId,
+                      userId: user.id,
+                      role: tournamentInvite.role,
+                    },
+                  },
+                );
+
+                if (!existingVolunteer) {
+                  await tx.insert(tournamentVolunteerTable).values({
+                    tournamentId: tournamentInvite.tournamentId,
+                    userId: user.id,
+                    role: tournamentInvite.role,
+                  });
+                }
+              }
+            }
+
             // Handle Organization Invite
             if (invite.invteType.code === "organization") {
               const [orgInvite] = await tx

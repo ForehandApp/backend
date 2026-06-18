@@ -5,9 +5,11 @@ import {
   eventTable,
   teamTable,
   organizationMemberTable,
+  profileTable,
+  tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { eq, and, notInArray } from "drizzle-orm";
+import { eq, and, notInArray, ne } from "drizzle-orm";
 import { t } from "elysia";
 
 export const matchRoutes = protectedApi.group("/match", (app) =>
@@ -58,7 +60,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   roundNumber: matchData.roundNumber,
                   teamA: matchData.teamA,
                   teamB: matchData.teamB,
-                  scorer: matchData.scorer || user.id,
+                  scorer: matchData.scorer ?? null,
                   winnerId: matchData.winnerId ?? null,
                   matchState: matchData.matchState || "scheduled",
                   setsPerMatchId: matchData.setsPerMatch || event.setsPerMatch,
@@ -451,6 +453,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                 },
               },
             },
+            scorerUser: true,
           },
         });
 
@@ -493,6 +496,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                 },
               },
             },
+            scorerUser: true,
           },
         });
 
@@ -506,6 +510,212 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
         params: t.Object({ eventId: t.String({ format: "uuid" }) }),
         body: t.Object({
           roundNumber: t.Number(),
+        }),
+      },
+    )
+    .get(
+      "/available-scorers/:matchId",
+      async ({ user, db, params: { matchId } }) => {
+        const match = await db.query.matchTable.findFirst({
+          where: { id: matchId },
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+            scorerUser: true,
+          },
+        });
+
+        if (!match?.event?.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Match or related tournament not found",
+          });
+        }
+
+        const member = await db.query.organizationMemberTable.findFirst({
+          where: ((table: any, { eq, and }: any) =>
+            and(
+              eq(table.organizationId, match.event!.tournament!.organizationId),
+              eq(table.userId, user.id),
+            )) as any,
+        });
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to manage scorers for this match",
+          });
+        }
+
+        const scorerRows = await db
+          .select({
+            id: profileTable.id,
+            name: profileTable.name,
+            avatarUrl: profileTable.profilePicUrl,
+          })
+          .from(tournamentVolunteerTable)
+          .innerJoin(profileTable, eq(tournamentVolunteerTable.userId, profileTable.id))
+          .where(
+            and(
+              eq(tournamentVolunteerTable.tournamentId, match.event.tournament.id),
+              eq(tournamentVolunteerTable.role, "scorer"),
+            ),
+          );
+
+        const assignedRows = await db
+          .select({
+            scorerId: matchTable.scorer,
+          })
+          .from(matchTable)
+          .where(
+            and(
+              eq(matchTable.eventId, match.eventId),
+              eq(matchTable.roundNumber, match.roundNumber),
+              ne(matchTable.id, matchId),
+              notInArray(matchTable.matchState, [
+                "completed",
+                "abandoned",
+                "walkover",
+              ]),
+            ),
+          );
+
+        const unavailableScorerIds = new Set(assignedRows.map((row) => row.scorerId));
+        const scorers = scorerRows.filter(
+          (row) => row.id !== match.scorer && !unavailableScorerIds.has(row.id),
+        );
+
+        return sendResponse({
+          success: true,
+          message: "Available scorers fetched successfully",
+          data: {
+            currentScorerId: match.scorer,
+            currentScorerName: match.scorerUser?.name || null,
+            scorers,
+          },
+        });
+      },
+      {
+        params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .post(
+      "/assign-scorer/:matchId",
+      async ({ user, db, params: { matchId }, body }) => {
+        const match = await db.query.matchTable.findFirst({
+          where: { id: matchId },
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+          },
+        });
+
+        if (!match?.event?.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Match or related tournament not found",
+          });
+        }
+
+        const member = await db.query.organizationMemberTable.findFirst({
+          where: ((table: any, { eq, and }: any) =>
+            and(
+              eq(table.organizationId, match.event!.tournament!.organizationId),
+              eq(table.userId, user.id),
+            )) as any,
+        });
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to assign scorers for this match",
+          });
+        }
+
+        if (body.scorerId === null) {
+          await db
+            .update(matchTable)
+            .set({
+              scorer: null,
+            })
+            .where(eq(matchTable.id, matchId));
+
+          return sendResponse({
+            success: true,
+            message: "Scorer removed successfully",
+            data: null,
+          });
+        }
+
+        const [candidate] = await db
+          .select({
+            id: profileTable.id,
+            name: profileTable.name,
+            avatarUrl: profileTable.profilePicUrl,
+          })
+          .from(tournamentVolunteerTable)
+          .innerJoin(profileTable, eq(tournamentVolunteerTable.userId, profileTable.id))
+          .where(
+            and(
+              eq(tournamentVolunteerTable.tournamentId, match.event.tournament.id),
+              eq(tournamentVolunteerTable.role, "scorer"),
+              eq(tournamentVolunteerTable.userId, body.scorerId),
+            ),
+          )
+          .limit(1);
+
+        if (!candidate) {
+          return sendResponse({
+            success: false,
+            message: "Selected user is not an available scorer for this tournament",
+          });
+        }
+
+        const conflictingMatch = await db.query.matchTable.findFirst({
+          where: ((table: any, { eq, and, ne, notInArray }: any) =>
+            and(
+              eq(table.eventId, match.eventId),
+              eq(table.roundNumber, match.roundNumber),
+              eq(table.scorer, body.scorerId),
+              ne(table.id, matchId),
+              notInArray(table.matchState, [
+                "completed",
+                "abandoned",
+                "walkover",
+              ]),
+            )) as any,
+        });
+
+        if (conflictingMatch) {
+          return sendResponse({
+            success: false,
+            message: "This scorer is already assigned to another active match in this round",
+          });
+        }
+
+        await db
+          .update(matchTable)
+          .set({
+            scorer: body.scorerId,
+          })
+          .where(eq(matchTable.id, matchId));
+
+        return sendResponse({
+          success: true,
+          message: "Scorer assigned successfully",
+          data: candidate,
+        });
+      },
+      {
+        params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+        body: t.Object({
+          scorerId: t.Union([t.String({ format: "uuid" }), t.Null()]),
         }),
       },
     )
@@ -1035,6 +1245,54 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           matchId: t.String({ format: "uuid" }),
           setNumber: t.Number(),
         }),
+      },
+    )
+    .get(
+      "/scorer-matches",
+      async ({ user, db }) => {
+        try {
+          const matches = await db.query.matchTable.findMany({
+            where: ((table: any, { eq }: any) => eq(table.scorer, user.id)) as any,
+            with: {
+              sets: true,
+              event: {
+                with: {
+                  tournament: true,
+                },
+              },
+              teamAData: {
+                with: {
+                  participants: {
+                    with: {
+                      user: true,
+                    },
+                  },
+                },
+              },
+              teamBData: {
+                with: {
+                  participants: {
+                    with: {
+                      user: true,
+                    },
+                  },
+                },
+              },
+            },
+          });
+
+          return sendResponse({
+            success: true,
+            message: "Scorer matches fetched successfully",
+            data: matches,
+          });
+        } catch (error) {
+          console.error("[match/scorer-matches] failed:", error);
+          return sendResponse({
+            success: false,
+            message: "Failed to fetch scorer matches",
+          });
+        }
       },
     ),
 );
