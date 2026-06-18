@@ -1,4 +1,10 @@
-import { boolean, integer, pgTable, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  integer,
+  pgTable,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { eventTable, teamTable } from "./tournament";
 import { profileTable } from "./user";
 import { matchStateEnum, setStateEnum, sideSwitchEnum } from "./enums";
@@ -35,6 +41,8 @@ export const matchTable = pgTable.withRLS("match_table", {
   deuce_limit: boolean("deuce_limit").notNull().default(false),
 
   sideSwitching: sideSwitchEnum("side_switching").notNull(),
+
+  startTime: timestamp("start_time", { mode: "date" }),
 
   createdAt,
   updatedAt,

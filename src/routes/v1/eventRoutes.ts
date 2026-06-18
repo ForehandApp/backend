@@ -79,13 +79,13 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           const paymentMode =
             event.paymentModeCode !== null
               ? await db.query.paymentModesTable.findFirst({
-                  where: {
-                    code: event.paymentModeCode,
-                  },
-                  columns: {
-                    id: true,
-                  },
-                })
+                where: {
+                  code: event.paymentModeCode,
+                },
+                columns: {
+                  id: true,
+                },
+              })
               : null;
 
           if (
@@ -238,6 +238,158 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
       },
       {
         params: t.Object({ eventId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .patch(
+      "/:eventId",
+      async ({ db, user, params: { eventId }, body }) => {
+        const event = await db.query.eventTable.findFirst({
+          where: {
+            id: eventId
+          },
+          with: {
+            tournament: true,
+          },
+        });
+
+        if (!event || !event.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Event or related tournament not found",
+          });
+        }
+
+        const member = await db.query.organizationMemberTable.findFirst({
+          where: ((table: any, { eq, and }: any) =>
+            and(
+              eq(table.organizationId, event.tournament!.organizationId),
+              eq(table.userId, user.id),
+            )) as any,
+        });
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not eligible to update this event",
+          });
+        }
+
+        const updateValues: Record<string, any> = {};
+        if (body.name !== undefined) updateValues.name = body.name;
+        if (body.gender !== undefined) updateValues.gender = body.gender;
+        if (body.pointsPerSet !== undefined) updateValues.pointsPerSet = body.pointsPerSet;
+        if (body.setsPerMatch !== undefined) updateValues.setsPerMatch = body.setsPerMatch;
+        if (body.amount !== undefined) updateValues.amount = body.amount;
+
+        if (body.dueDate !== undefined) updateValues.dueDate = getDate(body.dueDate);
+        if (body.startDate !== undefined) updateValues.startDate = getDate(body.startDate);
+        if (body.playerBornAfter !== undefined) {
+          updateValues.playerBornAfter = body.playerBornAfter !== null ? getDate(body.playerBornAfter) : null;
+        }
+
+        // Validate due date is not after start date if either is modified
+        const finalDueDate = updateValues.dueDate !== undefined ? updateValues.dueDate : getDate(String(event.dueDate));
+        const finalStartDate = updateValues.startDate !== undefined ? updateValues.startDate : getDate(String(event.startDate));
+        if (finalDueDate.getTime() > finalStartDate.getTime()) {
+          return sendResponse({
+            success: false,
+            message: "Due date cannot be after event start date",
+          });
+        }
+
+        if (body.sportsOptionCode !== undefined) {
+          const sport = await db.query.sportsOptionsTable.findFirst({
+            where: { code: body.sportsOptionCode },
+            columns: { id: true },
+          });
+          if (!sport) {
+            return sendResponse({
+              success: false,
+              message: "Invalid sports option code",
+            });
+          }
+          updateValues.sportId = sport.id;
+        }
+
+        if (body.eventFormatCode !== undefined) {
+          const format = await db.query.eventFormatsTable.findFirst({
+            where: { code: body.eventFormatCode },
+            columns: { id: true },
+          });
+          if (!format) {
+            return sendResponse({
+              success: false,
+              message: "Invalid event format code",
+            });
+          }
+          updateValues.formatId = format.id;
+        }
+
+        if (body.teamTypeCode !== undefined) {
+          const teamType = await db.query.teamTypesTable.findFirst({
+            where: { code: body.teamTypeCode },
+            columns: { id: true },
+          });
+          if (!teamType) {
+            return sendResponse({
+              success: false,
+              message: "Invalid team type code",
+            });
+          }
+          updateValues.teamTypeId = teamType.id;
+        }
+
+        if (body.paymentModeCode !== undefined) {
+          if (body.paymentModeCode === null) {
+            updateValues.paymentModeId = null;
+          } else {
+            const paymentMode = await db.query.paymentModesTable.findFirst({
+              where: { code: body.paymentModeCode },
+              columns: { id: true },
+            });
+            if (!paymentMode) {
+              return sendResponse({
+                success: false,
+                message: "Invalid payment mode code",
+              });
+            }
+            updateValues.paymentModeId = paymentMode.id;
+          }
+        }
+
+        if (Object.keys(updateValues).length === 0) {
+          return sendResponse({
+            success: false,
+            message: "No fields to update",
+          });
+        }
+
+        await db
+          .update(eventTable)
+          .set(updateValues)
+          .where(eq(eventTable.id, eventId));
+
+        return sendResponse({
+          success: true,
+          message: "Event updated successfully",
+        });
+      },
+      {
+        params: t.Object({ eventId: t.String({ format: "uuid" }) }),
+        body: t.Object({
+          name: t.Optional(t.String()),
+          sportsOptionCode: t.Optional(t.String()),
+          eventFormatCode: t.Optional(t.String()),
+          dueDate: t.Optional(t.String()),
+          startDate: t.Optional(t.String()),
+          gender: t.Optional(t.Nullable(t.UnionEnum(["male", "female"]))),
+          teamTypeCode: t.Optional(t.String()),
+          setsPerMatch: t.Optional(t.Number()),
+          pointsPerSet: t.Optional(t.Number()),
+          playerBornAfter: t.Optional(t.Nullable(t.String())),
+          paymentModeCode: t.Optional(t.Nullable(t.String())),
+          amount: t.Optional(t.Number()),
+        }),
       },
     )
     .post(
@@ -743,6 +895,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
                 teamB: match.teamB,
                 scorer: match.scorer || user.id,
                 matchState: "scheduled",
+                startTime: getDate(match.startTime),
                 setsPerMatchId: match.setsPerMatch || event.setsPerMatch,
                 pointsPerSet: match.pointsPerSet || event.pointsPerSet,
                 sideSwitching: match.sideSwitching || "per_set",
@@ -773,6 +926,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               scorer: t.Optional(t.String()),
               setsPerMatch: t.Optional(t.Number()),
               pointsPerSet: t.Optional(t.Number()),
+              startTime: t.String(),
               sideSwitching: t.Optional(
                 t.Union([
                   t.Literal("per_set"),

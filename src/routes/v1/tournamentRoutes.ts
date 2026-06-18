@@ -49,6 +49,94 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         params: t.Object({ tournamentId: t.String({ format: "uuid" }) }),
       },
     )
+    .patch(
+      "/:tournamentId",
+      async ({ db, user, params: { tournamentId }, body }) => {
+        const tournament = await db.query.tournamentTable.findFirst({
+          where: { id: tournamentId },
+        });
+
+        if (!tournament) {
+          return sendResponse({
+            success: false,
+            message: "Tournament not found",
+          });
+        }
+
+        const member = await db.query.organizationMemberTable.findFirst({
+          where: ((table: any, { eq, and }: any) =>
+            and(
+              eq(table.organizationId, tournament.organizationId),
+              eq(table.userId, user.id),
+            )) as any,
+        });
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not eligible to update this tournament",
+          });
+        }
+
+        const updateValues: Record<string, any> = {};
+        if (body.name !== undefined) updateValues.name = body.name;
+        if (body.description !== undefined) updateValues.description = body.description;
+        if (body.startDate !== undefined) updateValues.startDate = getDate(body.startDate);
+        if (body.endDate !== undefined) {
+          updateValues.endDate = body.endDate !== null ? getDate(body.endDate) : null;
+        }
+        if (body.venueName !== undefined) updateValues.venueName = body.venueName;
+        if (body.venueAddress !== undefined) updateValues.venueAddress = body.venueAddress;
+        if (body.venueCity !== undefined) updateValues.venueCity = body.venueCity;
+        if (body.venueState !== undefined) updateValues.venueState = body.venueState;
+        if (body.venuePostalCode !== undefined) updateValues.venuePostalCode = body.venuePostalCode;
+        if (body.venueCourts !== undefined) updateValues.venueCourts = body.venueCourts;
+        if (body.contactName !== undefined) updateValues.contactName = body.contactName;
+        if (body.contactEmail !== undefined) updateValues.contactEmail = body.contactEmail;
+        if (body.contactPhone !== undefined) updateValues.contactPhone = body.contactPhone;
+        if (body.upiId !== undefined) updateValues.upiId = body.upiId;
+        if (body.logoUrl !== undefined) updateValues.logoUrl = body.logoUrl;
+        if (body.logoPath !== undefined) updateValues.logoPath = body.logoPath;
+
+        if (Object.keys(updateValues).length === 0) {
+          return sendResponse({
+            success: false,
+            message: "No fields to update",
+          });
+        }
+
+        await db
+          .update(tournamentTable)
+          .set(updateValues)
+          .where(eq(tournamentTable.id, tournamentId));
+
+        return sendResponse({
+          success: true,
+          message: "Tournament updated successfully",
+        });
+      },
+      {
+        params: t.Object({ tournamentId: t.String({ format: "uuid" }) }),
+        body: t.Object({
+          name: t.Optional(t.String()),
+          description: t.Optional(t.String()),
+          startDate: t.Optional(t.String()),
+          endDate: t.Optional(t.Nullable(t.String())),
+          venueName: t.Optional(t.String()),
+          venueAddress: t.Optional(t.Nullable(t.String())),
+          venueCity: t.Optional(t.String()),
+          venueState: t.Optional(t.String()),
+          venuePostalCode: t.Optional(t.String()),
+          venueCourts: t.Optional(t.Number()),
+          contactName: t.Optional(t.String()),
+          contactEmail: t.Optional(t.String()),
+          contactPhone: t.Optional(t.String({ pattern: "^[6-9]\\d{9}$" })),
+          upiId: t.Optional(t.Nullable(t.String())),
+          logoUrl: t.Optional(t.Nullable(t.String())),
+          logoPath: t.Optional(t.Nullable(t.String())),
+        }),
+      },
+    )
     .get(
       "/participants/:tournamentId",
       async ({ db, params: { tournamentId } }) => {

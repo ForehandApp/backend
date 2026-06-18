@@ -1,0 +1,1 @@
+ALTER TABLE "match_table" ADD COLUMN "start_time" timestamp;
