@@ -535,13 +535,16 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const member = await db.query.organizationMemberTable.findFirst({
-          where: ((table: any, { eq, and }: any) =>
+        const [member] = await db
+          .select()
+          .from(organizationMemberTable)
+          .where(
             and(
-              eq(table.organizationId, match.event!.tournament!.organizationId),
-              eq(table.userId, user.id),
-            )) as any,
-        });
+              eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
+              eq(organizationMemberTable.userId, user.id),
+            ),
+          )
+          .limit(1);
 
         if (!member) {
           return sendResponse({
@@ -565,6 +568,22 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             ),
           );
 
+        const adminRows = await db
+          .select({
+            id: profileTable.id,
+            name: profileTable.name,
+            avatarUrl: profileTable.profilePicUrl,
+          })
+          .from(organizationMemberTable)
+          .innerJoin(profileTable, eq(organizationMemberTable.userId, profileTable.id))
+          .where(
+            eq(organizationMemberTable.organizationId, match.event.tournament.organizationId)
+          );
+
+        const allPotentialScorers = [...scorerRows, ...adminRows].filter(
+          (v, i, a) => a.findIndex((t) => t.id === v.id) === i
+        );
+
         const assignedRows = await db
           .select({
             scorerId: matchTable.scorer,
@@ -584,7 +603,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           );
 
         const unavailableScorerIds = new Set(assignedRows.map((row) => row.scorerId));
-        const scorers = scorerRows.filter(
+        const scorers = allPotentialScorers.filter(
           (row) => row.id !== match.scorer && !unavailableScorerIds.has(row.id),
         );
 
@@ -623,13 +642,16 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const member = await db.query.organizationMemberTable.findFirst({
-          where: ((table: any, { eq, and }: any) =>
+        const [member] = await db
+          .select()
+          .from(organizationMemberTable)
+          .where(
             and(
-              eq(table.organizationId, match.event!.tournament!.organizationId),
-              eq(table.userId, user.id),
-            )) as any,
-        });
+              eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
+              eq(organizationMemberTable.userId, user.id),
+            ),
+          )
+          .limit(1);
 
         if (!member) {
           return sendResponse({
@@ -653,7 +675,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [candidate] = await db
+        let [candidate]: any = await db
           .select({
             id: profileTable.id,
             name: profileTable.name,
@@ -671,26 +693,48 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           .limit(1);
 
         if (!candidate) {
-          return sendResponse({
-            success: false,
-            message: "Selected user is not an available scorer for this tournament",
-          });
+          const [adminCandidate] = await db
+            .select({
+              id: profileTable.id,
+              name: profileTable.name,
+              avatarUrl: profileTable.profilePicUrl,
+            })
+            .from(organizationMemberTable)
+            .innerJoin(profileTable, eq(organizationMemberTable.userId, profileTable.id))
+            .where(
+              and(
+                eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
+                eq(organizationMemberTable.userId, body.scorerId),
+              ),
+            )
+            .limit(1);
+
+          if (!adminCandidate) {
+            return sendResponse({
+              success: false,
+              message: "Selected user is not an available scorer for this tournament",
+            });
+          }
+          candidate = adminCandidate;
         }
 
-        const conflictingMatch = await db.query.matchTable.findFirst({
-          where: ((table: any, { eq, and, ne, notInArray }: any) =>
+        const [conflictingMatch] = await db
+          .select()
+          .from(matchTable)
+          .where(
             and(
-              eq(table.eventId, match.eventId),
-              eq(table.roundNumber, match.roundNumber),
-              eq(table.scorer, body.scorerId),
-              ne(table.id, matchId),
-              notInArray(table.matchState, [
+              eq(matchTable.eventId, match.eventId),
+              eq(matchTable.roundNumber, match.roundNumber),
+              eq(matchTable.scorer, body.scorerId),
+              ne(matchTable.id, matchId),
+              notInArray(matchTable.matchState, [
                 "completed",
                 "abandoned",
                 "walkover",
               ]),
-            )) as any,
-        });
+            ),
+          )
+          .limit(1);
 
         if (conflictingMatch) {
           return sendResponse({
@@ -1252,7 +1296,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       async ({ user, db }) => {
         try {
           const matches = await db.query.matchTable.findMany({
-            where: ((table: any, { eq }: any) => eq(table.scorer, user.id)) as any,
+            where: { scorer: user.id } as any,
             with: {
               sets: true,
               event: {

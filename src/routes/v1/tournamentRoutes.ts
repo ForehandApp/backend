@@ -826,6 +826,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               }
 
               const tournaments = await db.query.tournamentTable.findMany({
+                where: ((table: any, { inArray }: any) =>
+                  inArray(table.id, joinedTournamentIds)) as any,
                 with: {
                   events: {
                     with: {
@@ -840,18 +842,17 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 },
               });
 
-              // Filter events within each tournament to only include those the user joined
               const filtered = (tournaments as any[])
                 .filter(
                   (t) =>
-                    joinedTournamentIds.includes(t.id) &&
-                    (t.tournamentState === "published" ||
-                      t.tournamentState === "in_progress"),
+                    t.tournamentState === "published" ||
+                    t.tournamentState === "in_progress",
                 )
                 .map((t) => ({
                   ...t,
                   events: t.events.filter((e: any) => joinedEventIds.has(e.id)),
-                }));
+                }))
+                .filter((t) => t.events.length > 0);
 
               return sendResponse({
                 success: true,
