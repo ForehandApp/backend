@@ -440,6 +440,12 @@ export const userRoutes = protectedApi.group("/user", (app) =>
               teamB: currentSet ? currentSet.teamBScore : 0,
               currentSet: currentSet ? currentSet.setNumber : 1,
             },
+            sets: (match.sets || []).map((s: any) => ({
+              setNumber: s.setNumber,
+              teamAScore: s.teamAScore,
+              teamBScore: s.teamBScore,
+              setStatus: s.setStatus,
+            })).sort((a: any, b: any) => a.setNumber - b.setNumber),
             court: "Court TBD", // Court is not in schema yet
             isLive: true,
           });
