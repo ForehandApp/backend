@@ -16,7 +16,7 @@ import {
 } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
-import { eq, and, ne, desc, or, inArray } from "drizzle-orm";
+import { eq, and, ne, desc, asc, or, inArray } from "drizzle-orm";
 import { t } from "elysia";
 
 export const userRoutes = protectedApi.group("/user", (app) =>
@@ -217,6 +217,100 @@ export const userRoutes = protectedApi.group("/user", (app) =>
         return sendResponse({
           success: false,
           message: "Failed to fetch live match",
+        });
+      }
+    })
+    .get("/matches/upcoming", async ({ user, db }) => {
+      try {
+        // 1. Get all team IDs the user is part of
+        const userTeams = await db
+          .select({ teamId: teamParticipantTable.teamId })
+          .from(teamParticipantTable)
+          .where(eq(teamParticipantTable.userId, user.id));
+
+        const teamIds = userTeams.map((t) => t.teamId);
+
+        if (teamIds.length === 0) {
+          return sendResponse({
+            success: true,
+            message: "No upcoming matches found",
+            data: [],
+          });
+        }
+
+        // 2. Fetch scheduled matches with detailed relations
+        const matchesResult = await db.query.matchTable.findMany({
+          where: ((table: any, { and, or, eq }: any) =>
+            and(
+              eq(table.matchState, "scheduled"),
+              or(
+                ...teamIds.map((id) => eq(table.teamA, id)),
+                ...teamIds.map((id) => eq(table.teamB, id)),
+              ),
+            )) as any,
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+            teamAData: {
+              with: {
+                participants: {
+                  with: {
+                    user: true,
+                  },
+                },
+                teamType: true,
+              },
+            },
+            teamBData: {
+              with: {
+                participants: {
+                  with: {
+                    user: true,
+                  },
+                },
+              },
+            },
+          },
+        });
+
+        // 3. Format response
+        const formattedMatches = matchesResult.map((match: any) => {
+          const teamAPlayers = match.teamAData?.participants?.map((p: any) =>
+            p.user.id === user.id ? "You" : p.user.name,
+          ) || [];
+          const teamBPlayers = match.teamBData?.participants?.map((p: any) =>
+            p.user.id === user.id ? "You" : p.user.name,
+          ) || [];
+
+          return {
+            id: match.id,
+            eventId: match.eventId,
+            tournamentId: match.event?.tournamentId,
+            type: match.teamAData?.teamType?.label || "Match",
+            leagueTitle: match.event?.tournament?.name || "Tournament",
+            eventName: match.event?.name || "Event",
+            leftTeamName: teamAPlayers.join(" & ") || match.teamAData?.name,
+            rightTeamName: teamBPlayers.join(" & ") || match.teamBData?.name,
+            leftTeamPlayers: teamAPlayers,
+            rightTeamPlayers: teamBPlayers,
+            scheduledAt: match.startTime || match.createdAt,
+            venue: match.event?.tournament?.venueName || "TBD",
+          };
+        });
+
+        return sendResponse({
+          success: true,
+          message: "Upcoming matches fetched successfully",
+          data: formattedMatches,
+        });
+      } catch (error) {
+        console.error("[user/matches/upcoming] failed", error);
+        return sendResponse({
+          success: false,
+          message: "Failed to fetch upcoming matches",
         });
       }
     })
