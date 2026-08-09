@@ -917,6 +917,51 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 message: "Tournament history retrieved successfully",
                 data: filtered,
               });
+            })
+            .get("/managed", async ({ db, user }) => {
+              const adminAssignments = await db
+                .select({
+                  tournamentId: tournamentVolunteerTable.tournamentId,
+                })
+                .from(tournamentVolunteerTable)
+                .where(
+                  and(
+                    eq(tournamentVolunteerTable.userId, user.id),
+                    eq(tournamentVolunteerTable.role, "admin"),
+                  ),
+                );
+
+              const managedTournamentIds = [
+                ...new Set(adminAssignments.map((row) => row.tournamentId)),
+              ];
+
+              if (managedTournamentIds.length === 0) {
+                return sendResponse({
+                  success: true,
+                  message: "No managed tournaments found",
+                  data: [],
+                });
+              }
+
+              const tournaments = await db.query.tournamentTable.findMany({
+                where: ((table: any, { inArray }: any) =>
+                  inArray(table.id, managedTournamentIds)) as any,
+                with: {
+                  events: {
+                    with: {
+                      sportsOption: true,
+                    },
+                  },
+                  organization: true,
+                },
+                orderBy: (table: any, { desc }: any) => [desc(table.createdAt)],
+              });
+
+              return sendResponse({
+                success: true,
+                message: "Managed tournaments retrieved successfully",
+                data: tournaments,
+              });
             }),
         ),
     ),
