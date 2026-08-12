@@ -10,11 +10,14 @@ import {
 import { notInArray, sql } from "drizzle-orm";
 
 const orgTypes = [
-  { code: "educationalInstitute", label: "Educational Institute" },
-  { code: "sportsAcademy", label: "Sports Academy" },
-  { code: "sportsClub", label: "Sports Club" },
-  { code: "corporate", label: "Corporate" },
-  { code: "other", label: "Other" },
+  { code: "sportsClub", label: "Sports Club / Community Club" },
+  { code: "sportsAcademy", label: "Sports Academy / Training Center" },
+  { code: "educationalInstitute", label: "Educational Institute/ College / University/ School (K-12)" },
+  { code: "corporate", label: "Corporate / Company" },
+  { code: "sportsVenue", label: "Sports Venue / Facility" },
+  { code: "federation", label: "Federation / Governing Body (State/National)" },
+  { code: "brandSponsor", label: "Brand / Sponsor" },
+  { code: "vendorSeller", label: "Vendor / Sports Shop / Marketplace Seller" },
 ];
 
 const sportsOptions = [{ code: "pickleBall", label: "Pickle Ball" }];
