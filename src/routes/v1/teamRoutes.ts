@@ -11,6 +11,27 @@ import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, or } from "drizzle-orm";
 import { t } from "elysia";
 
+function isRegistrationClosed(event: {
+  dueDate: Date | string | null | undefined;
+  eventState?: string | null;
+}) {
+  if (event.eventState === "registration_closed") {
+    return true;
+  }
+
+  if (!event.dueDate) {
+    return false;
+  }
+
+  const dueDate = new Date(event.dueDate);
+  if (Number.isNaN(dueDate.getTime())) {
+    return false;
+  }
+
+  dueDate.setHours(23, 59, 59, 999);
+  return Date.now() > dueDate.getTime();
+}
+
 export const teamRoutes = protectedApi.group("/team", (app) =>
   app
     .post(
@@ -29,6 +50,13 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             return sendResponse({
               success: false,
               message: "Event or team type not found",
+            });
+          }
+
+          if (isRegistrationClosed(event)) {
+            return sendResponse({
+              success: false,
+              message: "Registration is closed for this event",
             });
           }
 
@@ -292,6 +320,13 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           return sendResponse({
             success: false,
             message: "Team or related tournament not found",
+          });
+        }
+
+        if (body.state === "registered" && isRegistrationClosed(team.event)) {
+          return sendResponse({
+            success: false,
+            message: "Registration is closed for this event",
           });
         }
 
