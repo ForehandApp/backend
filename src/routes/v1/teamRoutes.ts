@@ -598,8 +598,9 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
 
         if (result.length === 0 || !result[0]) {
           return sendResponse({
-            success: false,
+            success: true,
             message: "User is not in any team for this event",
+            data: null,
           });
         }
 

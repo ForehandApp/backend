@@ -764,6 +764,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   events: {
                     with: {
                       sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
                     },
                   },
                   organization: {
@@ -832,6 +834,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   events: {
                     with: {
                       sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
                     },
                   },
                   organization: {
@@ -895,6 +899,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   events: {
                     with: {
                       sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
                     },
                   },
                   organization: {
@@ -950,6 +956,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   events: {
                     with: {
                       sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
                     },
                   },
                   organization: true,
