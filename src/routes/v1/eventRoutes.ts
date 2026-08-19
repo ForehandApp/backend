@@ -598,18 +598,23 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
 
           const getTeamMeta = (team: any) => {
             const participants = team?.participants ?? [];
-            const names = participants
+            const scopedParticipants = participants.filter((p: any) => {
+              const participantTeamId =
+                p?.teamId ?? p?.team_id ?? p?.team?.id ?? null;
+              return participantTeamId ? participantTeamId === team?.id : true;
+            });
+            const names = scopedParticipants
               .map((p: any) => p?.user?.name)
               .filter(Boolean) as string[];
             const avatarUrl =
-              participants.find((p: any) => p?.user?.profilePicUrl)?.user
+              scopedParticipants.find((p: any) => p?.user?.profilePicUrl)?.user
                 ?.profilePicUrl ?? null;
 
             return {
               id: team?.id,
               name: names.length > 0 ? names.join(" / ") : "Unknown Team",
               avatarUrl,
-              players: participants
+              players: scopedParticipants
                 .map((p: any) => ({
                   id: p?.user?.id ?? null,
                   name: p?.user?.name ?? "Unknown Player",
@@ -619,9 +624,12 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             };
           };
 
+          const teamRows = event.teams ?? [];
+          const matchRows = event.matches ?? [];
+
           const statsByTeam = new Map<string, any>();
 
-          for (const team of event.teams ?? []) {
+          for (const team of teamRows) {
             const meta = getTeamMeta(team);
             if (!meta.id) continue;
             statsByTeam.set(meta.id, {
@@ -639,7 +647,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
-          for (const match of event.matches ?? []) {
+          for (const match of matchRows) {
             const teamAId = match.teamA;
             const teamBId = match.teamB;
             if (!teamAId || !teamBId) continue;
@@ -749,19 +757,19 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           return sendResponse({
             success: true,
             message: "Event results fetched successfully",
-            data: {
-              event: {
-                id: event.id,
-                name: event.name,
-                eventState: event.eventState,
-                tournamentId: event.tournamentId,
+              data: {
+                event: {
+                  id: event.id,
+                  name: event.name,
+                  eventState: event.eventState,
+                  tournamentId: event.tournamentId,
+                },
+                champion,
+                standings,
+                totalTeams: standings.length,
+              totalMatches: matchRows.length,
               },
-              champion,
-              standings,
-              totalTeams: standings.length,
-              totalMatches: (event.matches ?? []).length,
-            },
-          });
+            });
         } catch (error) {
           console.error("[event/results] failed", error);
           return sendResponse({

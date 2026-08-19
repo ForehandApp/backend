@@ -18,6 +18,11 @@ import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { t } from "elysia";
 
+function sanitizeTournamentTree(tournament: any) {
+  if (!tournament) return tournament;
+  return tournament;
+}
+
 export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
   app
     .get(
@@ -39,10 +44,12 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           where: { id: tournamentId },
         });
 
+        const sanitizedTournament = sanitizeTournamentTree(tournament);
+
         return sendResponse({
           success: true,
           message: "Tournament retrieved successfully",
-          data: tournament,
+          data: sanitizedTournament,
         });
       },
       {
@@ -208,69 +215,71 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             });
           }
 
-          const eventSummaries = (tournament.events ?? []).map((event: any) => {
-            const teams = event.teams ?? [];
-            const matches = event.matches ?? [];
+          const eventSummaries = (sanitizeTournamentTree(tournament).events ?? []).map(
+            (event: any) => {
+              const teams = event.teams ?? [];
+              const matches = event.matches ?? [];
 
-            const enrolledParticipants = teams.reduce(
-              (sum: number, team: any) =>
-                sum + (team.participants?.length ?? 0),
-              0,
-            );
+              const enrolledParticipants = teams.reduce(
+                (sum: number, team: any) =>
+                  sum + (team.participants?.length ?? 0),
+                0,
+              );
 
-            const totalTeams = teams.length;
-            const amount = Number(event.amount ?? 0);
-            const totalCollected = amount * totalTeams;
+              const totalTeams = teams.length;
+              const amount = Number(event.amount ?? 0);
+              const totalCollected = amount * totalTeams;
 
-            const totalMatches = matches.length;
-            const completedMatches = matches.filter(
-              (m: any) => m.matchState === "completed",
-            ).length;
-            const liveMatches = matches.filter(
-              (m: any) => m.matchState === "in_progress",
-            ).length;
-            const remainingMatches = Math.max(
-              totalMatches - completedMatches,
-              0,
-            );
+              const totalMatches = matches.length;
+              const completedMatches = matches.filter(
+                (m: any) => m.matchState === "completed",
+              ).length;
+              const liveMatches = matches.filter(
+                (m: any) => m.matchState === "in_progress",
+              ).length;
+              const remainingMatches = Math.max(
+                totalMatches - completedMatches,
+                0,
+              );
 
-            let stageText = "Registrations Open";
-            if (event.eventState === "scheduled") {
-              stageText = "Fixtures Scheduled";
-            } else if (event.eventState === "in_progress") {
-              stageText =
-                remainingMatches > 0
-                  ? `${remainingMatches} matches left`
-                  : "Matches in progress";
-            } else if (event.eventState === "completed") {
-              stageText = "Event Completed";
-            } else if (event.eventState === "cancelled") {
-              stageText = "Event Cancelled";
-            } else if (event.eventState === "participants_finalized") {
-              stageText = "Participants Finalized";
-            } else if (event.eventState === "registration_closed") {
-              stageText = "Registration Closed";
-            }
+              let stageText = "Registrations Open";
+              if (event.eventState === "scheduled") {
+                stageText = "Fixtures Scheduled";
+              } else if (event.eventState === "in_progress") {
+                stageText =
+                  remainingMatches > 0
+                    ? `${remainingMatches} matches left`
+                    : "Matches in progress";
+              } else if (event.eventState === "completed") {
+                stageText = "Event Completed";
+              } else if (event.eventState === "cancelled") {
+                stageText = "Event Cancelled";
+              } else if (event.eventState === "participants_finalized") {
+                stageText = "Participants Finalized";
+              } else if (event.eventState === "registration_closed") {
+                stageText = "Registration Closed";
+              }
 
-            return {
-              eventId: event.id,
-              eventName: event.name,
-              eventState: event.eventState,
-              amount,
-              totalCollected,
-              totalTeams,
-              enrolledParticipants,
-              confirmedParticipants: enrolledParticipants,
-              totalMatches,
-              completedMatches,
-              liveMatches,
-              remainingMatches,
-              activeRound: event.activeRound,
-              dueDate: event.dueDate,
-              startDate: event.startDate,
-              stageText,
-            };
-          });
+              return {
+                eventId: event.id,
+                eventName: event.name,
+                eventState: event.eventState,
+                amount,
+                totalCollected,
+                totalTeams,
+                enrolledParticipants,
+                confirmedParticipants: enrolledParticipants,
+                totalMatches,
+                completedMatches,
+                liveMatches,
+                remainingMatches,
+                activeRound: event.activeRound,
+                dueDate: event.dueDate,
+                startDate: event.startDate,
+                stageText,
+              };
+            },
+          );
 
           return sendResponse({
             success: true,

@@ -15,21 +15,7 @@ function isRegistrationClosed(event: {
   dueDate: Date | string | null | undefined;
   eventState?: string | null;
 }) {
-  if (event.eventState === "registration_closed") {
-    return true;
-  }
-
-  if (!event.dueDate) {
-    return false;
-  }
-
-  const dueDate = new Date(event.dueDate);
-  if (Number.isNaN(dueDate.getTime())) {
-    return false;
-  }
-
-  dueDate.setHours(23, 59, 59, 999);
-  return Date.now() > dueDate.getTime();
+  return event.eventState === "registration_closed";
 }
 
 export const teamRoutes = protectedApi.group("/team", (app) =>
@@ -102,6 +88,26 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             );
 
           if (existingParticipants.length > 0) {
+            const existingTeamForUser = await db
+              .select({ id: teamTable.id })
+              .from(teamParticipantTable)
+              .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+              .where(
+                and(
+                  eq(teamParticipantTable.userId, user.id),
+                  eq(teamTable.eventId, body.eventId),
+                ),
+              )
+              .limit(1);
+
+            if (existingTeamForUser.length > 0 && existingTeamForUser[0]) {
+              return sendResponse({
+                success: true,
+                message: "Team already exists for this event",
+                data: { teamId: existingTeamForUser[0].id },
+              });
+            }
+
             return sendResponse({
               success: false,
               message:
