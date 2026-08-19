@@ -8,14 +8,239 @@ import {
   teamActionLogsTable,
   teamParticipantTable,
   teamTable,
+  organizationTable,
+  tournamentTable,
 } from "@/services/db/schema";
-import { inArray, eq, and, notInArray } from "drizzle-orm";
+import {
+  inArray,
+  eq,
+  and,
+  notInArray,
+} from "drizzle-orm";
+import {
+  sportsOptionsTable,
+  eventFormatsTable,
+  paymentModesTable,
+  teamTypesTable,
+} from "@/services/db/schema";
+import { profileTable } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { t } from "elysia";
 
 export const eventRoutes = protectedApi.group("/event", (app) =>
   app
+    .get(
+      "/:eventId",
+      async ({ db, params: { eventId } }) => {
+        const [event] = await db
+          .select()
+          .from(eventTable)
+          .where(eq(eventTable.id, eventId))
+          .limit(1);
+
+        if (!event) {
+          return sendResponse({
+            success: false,
+            message: "Event not found",
+          });
+        }
+
+        const [tournament, sportsOption, eventFormat, teamType, paymentMode] =
+          await Promise.all([
+            db
+              .select()
+              .from(tournamentTable)
+              .where(eq(tournamentTable.id, event.tournamentId))
+              .limit(1)
+              .then((rows) => rows[0] ?? null),
+            event.sportId
+              ? db
+                  .select()
+                  .from(sportsOptionsTable)
+                  .where(eq(sportsOptionsTable.id, event.sportId))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null)
+              : Promise.resolve(null),
+            event.formatId
+              ? db
+                  .select()
+                  .from(eventFormatsTable)
+                  .where(eq(eventFormatsTable.id, event.formatId))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null)
+              : Promise.resolve(null),
+            event.teamTypeId
+              ? db
+                  .select()
+                  .from(teamTypesTable)
+                  .where(eq(teamTypesTable.id, event.teamTypeId))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null)
+              : Promise.resolve(null),
+            event.paymentModeId
+              ? db
+                  .select()
+                  .from(paymentModesTable)
+                  .where(eq(paymentModesTable.id, event.paymentModeId))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null)
+              : Promise.resolve(null),
+          ]);
+
+        const organization = tournament
+          ? await db
+              .select()
+              .from(organizationTable)
+              .where(eq(organizationTable.id, tournament.organizationId))
+              .limit(1)
+              .then((rows) => rows[0] ?? null)
+          : null;
+
+        const teams = await db
+          .select()
+          .from(teamTable)
+          .where(eq(teamTable.eventId, eventId));
+        const teamIds = teams.map((team) => team.id).filter(Boolean) as string[];
+
+        const participantRows = teamIds.length
+          ? await db
+              .select({
+                teamId: teamParticipantTable.teamId,
+                user: profileTable,
+              })
+              .from(teamParticipantTable)
+              .innerJoin(
+                profileTable,
+                eq(teamParticipantTable.userId, profileTable.id),
+              )
+              .where(inArray(teamParticipantTable.teamId, teamIds))
+          : [];
+
+        const participantsByTeamId = new Map<string, any[]>();
+        for (const row of participantRows as any[]) {
+          const current = participantsByTeamId.get(row.teamId) || [];
+          current.push({ user: row.user });
+          participantsByTeamId.set(row.teamId, current);
+        }
+
+        const normalizedTeams = teams.map((team) => ({
+          ...team,
+          participants: participantsByTeamId.get(team.id) || [],
+        }));
+
+        const matches = await db
+          .select()
+          .from(matchTable)
+          .where(eq(matchTable.eventId, eventId));
+        const matchIds = matches.map((match) => match.id).filter(Boolean) as string[];
+
+        const sets = matchIds.length
+          ? await db
+              .select()
+              .from(setTable)
+              .where(inArray(setTable.matchId, matchIds))
+          : [];
+
+        const scorerIds = [
+          ...new Set(matches.map((match) => match.scorer).filter(Boolean)),
+        ] as string[];
+        const teamAIds = [
+          ...new Set(matches.map((match) => match.teamA).filter(Boolean)),
+        ] as string[];
+        const teamBIds = [
+          ...new Set(matches.map((match) => match.teamB).filter(Boolean)),
+        ] as string[];
+        const winnerIds = [
+          ...new Set(matches.map((match) => match.winnerId).filter(Boolean)),
+        ] as string[];
+
+        const [scorers, teamAData, teamBData, winners] = await Promise.all([
+          scorerIds.length
+            ? db
+                .select()
+                .from(profileTable)
+                .where(inArray(profileTable.id, scorerIds))
+            : Promise.resolve([]),
+          teamAIds.length
+            ? db
+                .select()
+                .from(teamTable)
+                .where(inArray(teamTable.id, teamAIds))
+            : Promise.resolve([]),
+          teamBIds.length
+            ? db
+                .select()
+                .from(teamTable)
+                .where(inArray(teamTable.id, teamBIds))
+            : Promise.resolve([]),
+          winnerIds.length
+            ? db
+                .select()
+                .from(teamTable)
+                .where(inArray(teamTable.id, winnerIds))
+            : Promise.resolve([]),
+        ]);
+
+        const scorerMap = new Map<string, any>(
+          (scorers as any[]).map((scorer) => [scorer.id, scorer]),
+        );
+        const teamMapEntries = [
+          ...normalizedTeams,
+          ...(teamAData as any[]),
+          ...(teamBData as any[]),
+          ...(winners as any[]),
+        ]
+          .filter((team: any) => team?.id)
+          .map((team: any) => [
+            team.id,
+            {
+              ...team,
+              participants: participantsByTeamId.get(team.id) || [],
+            },
+          ] as const);
+        const teamMap = new Map<string, any>(teamMapEntries);
+
+        const setsByMatchId = new Map<string, any[]>();
+        for (const setRow of sets as any[]) {
+          const current = setsByMatchId.get(setRow.matchId) || [];
+          current.push(setRow);
+          setsByMatchId.set(setRow.matchId, current);
+        }
+
+        const normalizedMatches = matches.map((match) => ({
+          ...match,
+          sets: setsByMatchId.get(match.id) || [],
+          scorerUser: match.scorer ? scorerMap.get(match.scorer) || null : null,
+          teamAData: match.teamA ? teamMap.get(match.teamA) || null : null,
+          teamBData: match.teamB ? teamMap.get(match.teamB) || null : null,
+          winner: match.winnerId ? teamMap.get(match.winnerId) || null : null,
+        }));
+
+        return sendResponse({
+          success: true,
+          message: "Event retrieved successfully",
+          data: {
+            ...event,
+            tournament: tournament
+              ? {
+                  ...tournament,
+                  organization,
+                }
+              : null,
+            sportsOption,
+            eventFormat,
+            teamType,
+            paymentMode,
+            teams: normalizedTeams,
+            matches: normalizedMatches,
+          },
+        });
+      },
+      {
+        params: t.Object({ eventId: t.String({ format: "uuid" }) }),
+      },
+    )
     .post(
       "/create",
       async ({ user, db, body }) => {
@@ -541,53 +766,11 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
       "/results/:eventId",
       async ({ db, params: { eventId } }) => {
         try {
-          const event = await db.query.eventTable.findFirst({
-            where: ((table: any, { eq }: any) => eq(table.id, eventId)) as any,
-            with: {
-              tournament: true,
-              teams: {
-                with: {
-                  participants: {
-                    with: {
-                      user: true,
-                    },
-                  },
-                },
-              },
-              winner: {
-                with: {
-                  participants: {
-                    with: {
-                      user: true,
-                    },
-                  },
-                },
-              },
-              matches: {
-                with: {
-                  sets: true,
-                  teamAData: {
-                    with: {
-                      participants: {
-                        with: {
-                          user: true,
-                        },
-                      },
-                    },
-                  },
-                  teamBData: {
-                    with: {
-                      participants: {
-                        with: {
-                          user: true,
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          });
+          const [event] = await db
+            .select()
+            .from(eventTable)
+            .where(eq(eventTable.id, eventId))
+            .limit(1);
 
           if (!event) {
             return sendResponse({
@@ -596,47 +779,71 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
-          const getTeamMeta = (team: any) => {
-            const participants = team?.participants ?? [];
-            const scopedParticipants = participants.filter((p: any) => {
-              const participantTeamId =
-                p?.teamId ?? p?.team_id ?? p?.team?.id ?? null;
-              return participantTeamId ? participantTeamId === team?.id : true;
-            });
-            const names = scopedParticipants
-              .map((p: any) => p?.user?.name)
-              .filter(Boolean) as string[];
-            const avatarUrl =
-              scopedParticipants.find((p: any) => p?.user?.profilePicUrl)?.user
-                ?.profilePicUrl ?? null;
+          const teamRows = await db
+            .select()
+            .from(teamTable)
+            .where(eq(teamTable.eventId, eventId));
+          const matchRows = await db
+            .select()
+            .from(matchTable)
+            .where(eq(matchTable.eventId, eventId));
+          const matchIds = matchRows.map((match) => match.id).filter(Boolean) as string[];
+          const teamIds = teamRows.map((team) => team.id).filter(Boolean) as string[];
 
-            return {
-              id: team?.id,
-              name: names.length > 0 ? names.join(" / ") : "Unknown Team",
-              avatarUrl,
-              players: scopedParticipants
-                .map((p: any) => ({
-                  id: p?.user?.id ?? null,
-                  name: p?.user?.name ?? "Unknown Player",
-                  avatarUrl: p?.user?.profilePicUrl ?? null,
-                }))
-                .filter((p: any) => p.id !== null),
-            };
-          };
+          const [participantRows, setRows] = await Promise.all([
+            teamIds.length
+              ? db
+                  .select({
+                    teamId: teamParticipantTable.teamId,
+                    user: profileTable,
+                  })
+                  .from(teamParticipantTable)
+                  .innerJoin(
+                    profileTable,
+                    eq(teamParticipantTable.userId, profileTable.id),
+                  )
+                  .where(inArray(teamParticipantTable.teamId, teamIds))
+              : Promise.resolve([]),
+            matchIds.length
+              ? db
+                  .select()
+                  .from(setTable)
+                  .where(inArray(setTable.matchId, matchIds))
+              : Promise.resolve([]),
+          ]);
 
-          const teamRows = event.teams ?? [];
-          const matchRows = event.matches ?? [];
+          const participantsByTeamId = new Map<string, any[]>();
+          for (const row of participantRows as any[]) {
+            const current = participantsByTeamId.get(row.teamId) || [];
+            current.push(row.user);
+            participantsByTeamId.set(row.teamId, current);
+          }
 
-          const statsByTeam = new Map<string, any>();
+          const setsByMatchId = new Map<string, any[]>();
+          for (const setRow of setRows as any[]) {
+            const current = setsByMatchId.get(setRow.matchId) || [];
+            current.push(setRow);
+            setsByMatchId.set(setRow.matchId, current);
+          }
 
-          for (const team of teamRows) {
-            const meta = getTeamMeta(team);
-            if (!meta.id) continue;
-            statsByTeam.set(meta.id, {
-              teamId: meta.id,
-              teamName: meta.name,
-              avatarUrl: meta.avatarUrl,
-              players: meta.players,
+          const teamMetaById = new Map<string, any>();
+          for (const team of teamRows as any[]) {
+            const players = (participantsByTeamId.get(team.id) || []).map(
+              (user: any) => ({
+                id: user.id,
+                name: user.name,
+                avatarUrl: user.profilePicUrl ?? null,
+              }),
+            );
+            teamMetaById.set(team.id, {
+              teamId: team.id,
+              teamName:
+                players.length > 0
+                  ? players.map((p: any) => p.name).join(" / ")
+                  : team.name || "Unknown Team",
+              avatarUrl:
+                players.find((p: any) => p.avatarUrl)?.avatarUrl ?? null,
+              players,
               played: 0,
               wins: 0,
               losses: 0,
@@ -647,16 +854,27 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
+          const statsByTeam = new Map<string, any>();
+
+          for (const [teamId, meta] of teamMetaById.entries()) {
+            statsByTeam.set(teamId, meta);
+          }
+
           for (const match of matchRows) {
             const teamAId = match.teamA;
             const teamBId = match.teamB;
             if (!teamAId || !teamBId) continue;
 
             if (!statsByTeam.has(teamAId)) {
-              const meta = getTeamMeta(match.teamAData);
+              const meta = teamMetaById.get(teamAId) || {
+                teamId: teamAId,
+                teamName: "Unknown Team",
+                avatarUrl: null,
+                players: [],
+              };
               statsByTeam.set(teamAId, {
                 teamId: teamAId,
-                teamName: meta.name,
+                teamName: meta.teamName,
                 avatarUrl: meta.avatarUrl,
                 players: meta.players,
                 played: 0,
@@ -669,10 +887,15 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               });
             }
             if (!statsByTeam.has(teamBId)) {
-              const meta = getTeamMeta(match.teamBData);
+              const meta = teamMetaById.get(teamBId) || {
+                teamId: teamBId,
+                teamName: "Unknown Team",
+                avatarUrl: null,
+                players: [],
+              };
               statsByTeam.set(teamBId, {
                 teamId: teamBId,
-                teamName: meta.name,
+                teamName: meta.teamName,
                 avatarUrl: meta.avatarUrl,
                 players: meta.players,
                 played: 0,
@@ -697,7 +920,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               b.played += 1;
             }
 
-            for (const set of match.sets ?? []) {
+            for (const set of setsByMatchId.get(match.id) || []) {
               const aScore = set.teamAScore ?? 0;
               const bScore = set.teamBScore ?? 0;
               a.pointsFor += aScore;
@@ -748,28 +971,24 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
                       : null,
             }));
 
-          const championTeamId = event.winnerId || standings[0]?.teamId || null;
-          const champion =
-            standings.find((s) => s.teamId === championTeamId) ||
-            standings[0] ||
-            null;
+          const champion = standings[0] || null;
 
           return sendResponse({
             success: true,
             message: "Event results fetched successfully",
-              data: {
-                event: {
-                  id: event.id,
-                  name: event.name,
-                  eventState: event.eventState,
-                  tournamentId: event.tournamentId,
-                },
-                champion,
-                standings,
-                totalTeams: standings.length,
-              totalMatches: matchRows.length,
+            data: {
+              event: {
+                id: event.id,
+                name: event.name,
+                eventState: event.eventState,
+                tournamentId: event.tournamentId,
               },
-            });
+              champion,
+              standings,
+              totalTeams: standings.length,
+              totalMatches: matchRows.length,
+            },
+          });
         } catch (error) {
           console.error("[event/results] failed", error);
           return sendResponse({
