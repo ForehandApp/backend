@@ -41,7 +41,6 @@ export const publicApi = baseApi;
 
 export const protectedApi = baseApi
   .derive(async ({ request, supabase, status }) => {
-    console.log("here");
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return status(401, "Unauthorized");

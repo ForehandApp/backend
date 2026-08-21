@@ -17,8 +17,29 @@ import {
 } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
-import { eq, and, ne, desc, asc, or, inArray, notInArray } from "drizzle-orm";
+import { eq, and, ne, desc, asc, or, inArray, notInArray, sql } from "drizzle-orm";
 import { t } from "elysia";
+
+function getDateOnly(date: string) {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function getDbErrorDetails(error: unknown) {
+  const dbError = error as any;
+  const cause = dbError?.cause ?? dbError;
+
+  return {
+    name: dbError?.name,
+    message: dbError?.message,
+    code: cause?.code ?? dbError?.code,
+    detail: cause?.detail ?? dbError?.detail,
+    constraint: cause?.constraint ?? dbError?.constraint,
+    table: cause?.table ?? dbError?.table,
+    column: cause?.column ?? dbError?.column,
+  };
+}
 
 export const userRoutes = protectedApi.group("/user", (app) =>
   app
@@ -26,8 +47,6 @@ export const userRoutes = protectedApi.group("/user", (app) =>
       const userProfile = await db.query.profileTable.findFirst({
         where: { id: user.id },
       });
-
-      console.log(userProfile?.dob);
 
       return sendResponse({
         success: true,
@@ -792,7 +811,6 @@ export const userRoutes = protectedApi.group("/user", (app) =>
               },
         );
 
-        console.log(response);
         return response;
       },
       {
@@ -840,21 +858,95 @@ export const userRoutes = protectedApi.group("/user", (app) =>
     .post(
       "/register",
       async ({ user, db, body }) => {
-        // TDOD: Added duplicate check
-        await db.insert(profileTable).values({
-          id: user.id,
-          name: body.name,
+        const dob = getDateOnly(body.dob);
+        if (!dob) {
+          return sendResponse({
+            success: false,
+            message: "Invalid date of birth.",
+          });
+        }
+
+        console.info("[user/register] requested", {
+          userId: user.id,
           phone: body.phone,
           gender: body.gender,
-          dob: getDate(body.dob),
-          playingHand: body.playingHand,
-          primarySport: body.primarySport,
+          dob,
+          hasPlayingHand: Boolean(body.playingHand),
+          hasPrimarySport: Boolean(body.primarySport),
         });
 
-        return sendResponse({
-          message: "Created Profile",
-          success: true,
-        });
+        try {
+          const dobValue = sql`${dob}::date`;
+          const existingProfile = await db.query.profileTable.findFirst({
+            where: { id: user.id },
+            columns: { id: true },
+          });
+
+          if (existingProfile) {
+            await db
+              .update(profileTable)
+              .set({
+                name: body.name,
+                phone: body.phone,
+                gender: body.gender,
+                dob: dobValue,
+                playingHand: body.playingHand,
+                primarySport: body.primarySport,
+              })
+              .where(eq(profileTable.id, user.id));
+
+            console.info("[user/register] updated existing profile", {
+              userId: user.id,
+            });
+
+            return sendResponse({
+              message: "Profile already existed and was updated",
+              success: true,
+            });
+          }
+
+          await db.insert(profileTable).values({
+            id: user.id,
+            name: body.name,
+            phone: body.phone,
+            gender: body.gender,
+            dob: dobValue,
+            playingHand: body.playingHand,
+            primarySport: body.primarySport,
+          });
+
+          console.info("[user/register] created profile", {
+            userId: user.id,
+          });
+
+          return sendResponse({
+            message: "Created Profile",
+            success: true,
+          });
+        } catch (error) {
+          const details = getDbErrorDetails(error);
+          console.error("[user/register] failed", {
+            userId: user.id,
+            phone: body.phone,
+            dob,
+            details,
+          });
+
+          if (details.code === "23505") {
+            return sendResponse({
+              success: false,
+              message:
+                details.constraint === "profile_table_pkey"
+                  ? "A profile already exists for this account. Please refresh and continue."
+                  : "This profile information is already in use.",
+            });
+          }
+
+          return sendResponse({
+            success: false,
+            message: "Failed to create profile. Please try again.",
+          });
+        }
       },
       {
         body: t.Object({
@@ -888,7 +980,6 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           })
           .where(eq(profileTable.id, user.id));
 
-        console.log(new Date(body.dob));
         return sendResponse({
           message: "Profile Updated",
           success: true,

@@ -227,17 +227,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       "/update-score",
       async ({ user, db, body, server }: any) => {
         try {
-          console.log("[match/update-score] request", {
-            userId: user.id,
-            matchId: body.matchId,
-            setNumber: body.setNumber,
-            teamAScore: body.teamAScore,
-            teamBScore: body.teamBScore,
-            setStatus: body.setStatus,
-            winnerId: body.winnerId ?? null,
-            matchFinished: body.matchFinished ?? false,
-            matchWinnerId: body.matchWinnerId ?? null,
-          });
           const match = await db.query.matchTable.findFirst({
             where: ((table: any, { eq }: any) =>
               eq(table.id, body.matchId)) as any,
@@ -294,7 +283,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
 
             if (existingSet) {
-              const updatedSet = await tx
+              await tx
                 .update(setTable)
                 .set({
                   teamAScore: body.teamAScore,
@@ -309,13 +298,8 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   ),
                 )
                 .returning();
-              console.log("[match/update-score] set updated", {
-                matchId: body.matchId,
-                setNumber: body.setNumber,
-                setRows: updatedSet,
-              });
             } else {
-              const insertedSet = await tx
+              await tx
                 .insert(setTable)
                 .values({
                   matchId: body.matchId,
@@ -326,11 +310,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   winnerId: body.winnerId ?? null,
                 })
                 .returning();
-              console.log("[match/update-score] set inserted", {
-                matchId: body.matchId,
-                setNumber: body.setNumber,
-                setRows: insertedSet,
-              });
             }
 
             if (
@@ -518,11 +497,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           current.push(set);
           setsByMatchId.set(set.matchId, current);
         });
-        console.log("[match/list] set rows fetched", {
-          eventId,
-          matchIds,
-          setRows: sets,
-        });
         const matchesWithSets = (matches as any[]).map((match) => ({
           ...match,
           sets: (setsByMatchId.get(match.id) || []).sort(
@@ -586,12 +560,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           const current = setsByMatchId.get(set.matchId) || [];
           current.push(set);
           setsByMatchId.set(set.matchId, current);
-        });
-        console.log("[match/list:round] set rows fetched", {
-          eventId,
-          roundNumber: body.roundNumber,
-          matchIds,
-          setRows: sets,
         });
         const matchesWithSets = (matches as any[]).map((match) => ({
           ...match,
@@ -1244,10 +1212,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           .select()
           .from(setTable)
           .where(eq(setTable.matchId, matchId));
-        console.log("[match/info] set rows fetched", {
-          matchId,
-          setRows,
-        });
 
         return sendResponse({
           success: true,

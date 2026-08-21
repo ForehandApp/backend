@@ -16,8 +16,6 @@ import { t } from "elysia";
 export const orgRoutes = protectedApi.group("/org", (app) =>
   app
     .get("/list", async ({ db, user }) => {
-      console.log("[org/list] fetching orgs", { userId: user.id });
-
       const acceptedInviteOrgs = await db
         .select({ organizationId: organizationInvitesTable.organizationId })
         .from(organizationInvitesTable)
@@ -97,12 +95,6 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
           label: row.orgTypeLabel,
         },
       }));
-
-      console.log("[org/list] fetched", {
-        userId: user.id,
-        count: orgList.length,
-        orgIds: orgList.map((org) => org.id),
-      });
 
       return sendResponse({
         success: true,
@@ -279,8 +271,6 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
             success: false,
             message: "You are not a member of this organization",
           });
-
-        console.log("is member");
 
         const organizationData = await db.query.organizationTable.findFirst({
           where: ((table: any, { eq }: any) => eq(table.id, orgId)) as any,

@@ -13,9 +13,20 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { t } from "elysia";
+
+function phoneLookupVariants(phone: string) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  const tenDigitPhone = digits.length > 10 ? digits.slice(-10) : digits;
+  return [
+    tenDigitPhone,
+    `91${tenDigitPhone}`,
+    `+91${tenDigitPhone}`,
+    phone,
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+}
 
 export const inviteRoutes = protectedApi.group("/invite", (app) =>
   app
@@ -23,6 +34,14 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
       "/create",
       async ({ user, db, body }) => {
         try {
+          console.info("[invite/create] tournament crew invite requested", {
+            senderId: user.id,
+            tournamentId: body.tournamentId,
+            requestedRole: body.role,
+            phone: body.phone,
+            contextType: body.contextType,
+          });
+
           const [inviteType] = await db
             .select({
               id: inviteTypeTable.id,
@@ -42,9 +61,10 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
               id: profileTable.id,
               name: profileTable.name,
               profilePicUrl: profileTable.profilePicUrl,
+              phone: profileTable.phone,
             })
             .from(profileTable)
-            .where(eq(profileTable.phone, body.phone))
+            .where(inArray(profileTable.phone, phoneLookupVariants(body.phone)))
             .limit(1);
 
           if (!receiver) {
@@ -77,13 +97,24 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
             role: body.role,
           });
 
+          console.info("[invite/create] tournament crew invite stored", {
+            senderId: user.id,
+            receiverId: receiver.id,
+            inviteId: createdInvite.id,
+            tournamentId: body.tournamentId,
+            storedRole: body.role,
+            inviteState: createdInvite.inviteState,
+          });
+
           return sendResponse({
             success: true,
             message: "Invite created successfully",
             data: {
               inviteId: createdInvite.id,
               inviteState: createdInvite.inviteState,
+              receiverId: receiver.id,
               receiverName: receiver.name,
+              receiverPhone: receiver.phone,
               receiverProfilePicUrl: receiver.profilePicUrl,
             },
           });
@@ -152,7 +183,7 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
               phone: profileTable.phone,
             })
             .from(profileTable)
-            .where(eq(profileTable.phone, body.phone))
+            .where(inArray(profileTable.phone, phoneLookupVariants(body.phone)))
             .limit(1);
 
           if (!receiver) {
@@ -190,6 +221,7 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
             data: {
               inviteId: createdInvite.id,
               inviteState: createdInvite.inviteState,
+              receiverId: receiver.id,
               receiverName: receiver.name,
               receiverPhone: receiver.phone,
               receiverProfilePicUrl: receiver.profilePicUrl,
@@ -242,9 +274,10 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
               id: profileTable.id,
               name: profileTable.name,
               profilePicUrl: profileTable.profilePicUrl,
+              phone: profileTable.phone,
             })
             .from(profileTable)
-            .where(eq(profileTable.phone, body.phone))
+            .where(inArray(profileTable.phone, phoneLookupVariants(body.phone)))
             .limit(1);
 
           if (!receiver) {
@@ -288,7 +321,13 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           return sendResponse({
             success: true,
             message: "Event team invite created successfully",
-            data: { inviteId },
+            data: {
+              inviteId,
+              receiverId: receiver.id,
+              receiverName: receiver.name,
+              receiverPhone: receiver.phone,
+              receiverProfilePicUrl: receiver.profilePicUrl,
+            },
           });
         } catch (error) {
           console.error("[invite/event/team/create] failed", error);
@@ -447,9 +486,12 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           .from(tournamentVolunteerTable)
           .where(eq(tournamentVolunteerTable.tournamentId, body.tournamentId));
 
-        const volunteerRoleByUserId = new Map(
-          volunteerRows.map((row) => [row.userId, row.role]),
-        );
+        const volunteerRolesByUserId = new Map<string, string[]>();
+        for (const row of volunteerRows) {
+          const roles = volunteerRolesByUserId.get(row.userId) ?? [];
+          roles.push(row.role);
+          volunteerRolesByUserId.set(row.userId, roles);
+        }
 
         const rows = await db
           .select({
@@ -471,22 +513,41 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           .where(eq(tournamentInvitesTable.tournamentId, body.tournamentId))
           .orderBy(desc(invitesTable.createdAt));
 
-        const data = rows.map((row) => ({
-          id: row.inviteId,
-          role:
-            row.inviteState === "accepted"
-              ? (volunteerRoleByUserId.get(row.receiverId) ?? row.role)
-              : row.role,
-          name: row.receiverName,
-          phone: row.receiverPhone,
-          avatarUrl: row.receiverProfilePicUrl,
-          status:
-            row.inviteState === "pending"
-              ? "invite_sent"
-              : row.inviteState === "accepted"
-                ? "accepted"
-                : "rejected",
-        }));
+        const data = rows.map((row) => {
+          const volunteerRoles = volunteerRolesByUserId.get(row.receiverId) ?? [];
+          const hasMatchingVolunteerRole = volunteerRoles.includes(row.role);
+
+          return {
+            id: row.inviteId,
+            inviteId: row.inviteId,
+            userId: row.receiverId,
+            role: row.role,
+            name: row.receiverName,
+            phone: row.receiverPhone,
+            avatarUrl: row.receiverProfilePicUrl,
+            status:
+              row.inviteState === "pending"
+                ? "invite_sent"
+                : row.inviteState === "accepted"
+                  ? "accepted"
+                  : "rejected",
+            hasMatchingVolunteerRole,
+            volunteerRoles,
+          };
+        });
+
+        console.info("[invite/tournament/crew] role audit", {
+          tournamentId: body.tournamentId,
+          inviteRows: data.map((row) => ({
+            inviteId: row.inviteId,
+            userId: row.userId,
+            inviteRole: row.role,
+            status: row.status,
+            volunteerRoles: row.volunteerRoles,
+            hasMatchingVolunteerRole: row.hasMatchingVolunteerRole,
+            displaysUnder: row.role,
+          })),
+        });
 
         return sendResponse({
           success: true,
@@ -503,6 +564,12 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
     .post(
       "/tournament/crew/remove",
       async ({ user, db, body }) => {
+        console.info("[invite/tournament/crew/remove] requested", {
+          requesterId: user.id,
+          tournamentId: body.tournamentId,
+          inviteOrUserId: body.inviteId,
+        });
+
         const [row] = await db
           .select({
             inviteId: invitesTable.id,
@@ -525,9 +592,87 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           .limit(1);
 
         if (!row) {
+          const inviteRowsForUserId = await db
+            .select({
+              inviteId: invitesTable.id,
+              senderId: invitesTable.senderId,
+              receiverId: invitesTable.receiverId,
+              role: tournamentInvitesTable.role,
+            })
+            .from(tournamentInvitesTable)
+            .innerJoin(
+              invitesTable,
+              eq(tournamentInvitesTable.inviteId, invitesTable.id),
+            )
+            .where(
+              and(
+                eq(invitesTable.receiverId, body.inviteId),
+                eq(tournamentInvitesTable.tournamentId, body.tournamentId),
+              ),
+            );
+
+          const volunteer = await db.query.tournamentVolunteerTable.findFirst({
+            where: {
+              tournamentId: body.tournamentId,
+              userId: body.inviteId,
+            },
+          });
+
+          if (inviteRowsForUserId.length === 0 && !volunteer) {
+            console.info("[invite/tournament/crew/remove] not found", {
+              requesterId: user.id,
+              tournamentId: body.tournamentId,
+              inviteOrUserId: body.inviteId,
+            });
+
+            return sendResponse({
+              success: false,
+              message: "Crew invite not found.",
+            });
+          }
+
+          const removableInviteIds = inviteRowsForUserId
+            .filter((inviteRow) => inviteRow.senderId === user.id)
+            .map((inviteRow) => inviteRow.inviteId);
+
+          if (inviteRowsForUserId.length > 0 && removableInviteIds.length === 0) {
+            return sendResponse({
+              success: false,
+              message: "You are not allowed to remove this crew invite.",
+            });
+          }
+
+          await db.transaction(async (tx) => {
+            if (removableInviteIds.length > 0) {
+              await tx
+                .delete(tournamentInvitesTable)
+                .where(inArray(tournamentInvitesTable.inviteId, removableInviteIds));
+              await tx
+                .delete(invitesTable)
+                .where(inArray(invitesTable.id, removableInviteIds));
+            }
+
+            await tx
+              .delete(tournamentVolunteerTable)
+              .where(
+                and(
+                  eq(tournamentVolunteerTable.tournamentId, body.tournamentId),
+                  eq(tournamentVolunteerTable.userId, body.inviteId),
+                ),
+              );
+          });
+
+          console.info("[invite/tournament/crew/remove] removed by user id", {
+            requesterId: user.id,
+            tournamentId: body.tournamentId,
+            removedUserId: body.inviteId,
+            removedInviteIds: removableInviteIds,
+            removedVolunteer: Boolean(volunteer),
+          });
+
           return sendResponse({
-            success: false,
-            message: "Crew invite not found.",
+            success: true,
+            message: "Crew member removed successfully.",
           });
         }
 
@@ -538,26 +683,36 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           });
         }
 
-        await db
-          .delete(tournamentInvitesTable)
-          .where(
-            and(
-              eq(tournamentInvitesTable.inviteId, body.inviteId),
-              eq(tournamentInvitesTable.tournamentId, body.tournamentId),
-            ),
-          );
+        await db.transaction(async (tx) => {
+          await tx
+            .delete(tournamentInvitesTable)
+            .where(
+              and(
+                eq(tournamentInvitesTable.inviteId, body.inviteId),
+                eq(tournamentInvitesTable.tournamentId, body.tournamentId),
+              ),
+            );
 
-        await db.delete(invitesTable).where(eq(invitesTable.id, body.inviteId));
+          await tx.delete(invitesTable).where(eq(invitesTable.id, body.inviteId));
 
-        await db
-          .delete(tournamentVolunteerTable)
-          .where(
-            and(
-              eq(tournamentVolunteerTable.tournamentId, body.tournamentId),
-              eq(tournamentVolunteerTable.userId, row.receiverId),
-              eq(tournamentVolunteerTable.role, row.role),
-            ),
-          );
+          await tx
+            .delete(tournamentVolunteerTable)
+            .where(
+              and(
+                eq(tournamentVolunteerTable.tournamentId, body.tournamentId),
+                eq(tournamentVolunteerTable.userId, row.receiverId),
+                eq(tournamentVolunteerTable.role, row.role),
+              ),
+            );
+        });
+
+        console.info("[invite/tournament/crew/remove] removed by invite id", {
+          requesterId: user.id,
+          tournamentId: body.tournamentId,
+          inviteId: body.inviteId,
+          removedUserId: row.receiverId,
+          removedRole: row.role,
+        });
 
         return sendResponse({
           success: true,
