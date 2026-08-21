@@ -2,6 +2,7 @@ import {
   boolean,
   integer,
   pgTable,
+  text,
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -25,6 +26,8 @@ export const matchTable = pgTable.withRLS("match_table", {
     .references(() => teamTable.id),
 
   scorer: uuid("scorer").references(() => profileTable.id),
+
+  courtName: text("court_name"),
 
   winnerId: uuid("winner_id").references(() => teamTable.id),
 

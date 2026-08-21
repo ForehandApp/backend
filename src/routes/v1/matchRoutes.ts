@@ -9,7 +9,7 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { eq, and, notInArray, ne } from "drizzle-orm";
+import { eq, and, inArray, notInArray, ne } from "drizzle-orm";
 import { t } from "elysia";
 
 export const matchRoutes = protectedApi.group("/match", (app) =>
@@ -619,6 +619,339 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       },
       {
         params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .get(
+      "/available-courts/:matchId",
+      async ({ user, db, params: { matchId } }) => {
+        const match = await db.query.matchTable.findFirst({
+          where: { id: matchId },
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+          },
+        });
+
+        if (!match?.event?.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Match or related tournament not found",
+          });
+        }
+
+        const [member] = await db
+          .select()
+          .from(organizationMemberTable)
+          .where(
+            and(
+              eq(
+                organizationMemberTable.organizationId,
+                match.event.tournament.organizationId,
+              ),
+              eq(organizationMemberTable.userId, user.id),
+            ),
+          )
+          .limit(1);
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to manage courts for this match",
+          });
+        }
+
+        const venueCourts = Math.max(
+          0,
+          Number(match.event.tournament.venueCourts || 0),
+        );
+        const allCourts = Array.from(
+          { length: venueCourts },
+          (_, index) => `Court ${index + 1}`,
+        );
+
+        const tournamentEvents = await db
+          .select({ id: eventTable.id })
+          .from(eventTable)
+          .where(eq(eventTable.tournamentId, match.event.tournament.id));
+        const eventIds = tournamentEvents.map(
+          (event: { id: string }) => event.id,
+        );
+
+        const assignedRows =
+          eventIds.length > 0
+            ? await db
+                .select({ courtName: matchTable.courtName })
+                .from(matchTable)
+                .where(
+                  and(
+                    inArray(matchTable.eventId, eventIds),
+                    ne(matchTable.id, matchId),
+                    notInArray(matchTable.matchState, [
+                      "completed",
+                      "abandoned",
+                      "walkover",
+                    ]),
+                  ),
+                )
+            : [];
+
+        const currentCourtName = match.courtName?.trim() || null;
+        const unavailableCourts = new Set(
+          assignedRows
+            .map((row) => row.courtName?.trim())
+            .filter(Boolean) as string[],
+        );
+        const courts = allCourts.filter(
+          (courtName) =>
+            courtName !== currentCourtName && !unavailableCourts.has(courtName),
+        );
+
+        return sendResponse({
+          success: true,
+          message: "Available courts fetched successfully",
+          data: {
+            currentCourtName,
+            courts,
+          },
+        });
+      },
+      {
+        params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .post(
+      "/available-courts/:matchId",
+      async ({ user, db, params: { matchId } }) => {
+        const match = await db.query.matchTable.findFirst({
+          where: { id: matchId },
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+          },
+        });
+
+        if (!match?.event?.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Match or related tournament not found",
+          });
+        }
+
+        const [member] = await db
+          .select()
+          .from(organizationMemberTable)
+          .where(
+            and(
+              eq(
+                organizationMemberTable.organizationId,
+                match.event.tournament.organizationId,
+              ),
+              eq(organizationMemberTable.userId, user.id),
+            ),
+          )
+          .limit(1);
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to manage courts for this match",
+          });
+        }
+
+        const venueCourts = Math.max(
+          0,
+          Number(match.event.tournament.venueCourts || 0),
+        );
+        const allCourts = Array.from(
+          { length: venueCourts },
+          (_, index) => `Court ${index + 1}`,
+        );
+
+        const tournamentEvents = await db
+          .select({ id: eventTable.id })
+          .from(eventTable)
+          .where(eq(eventTable.tournamentId, match.event.tournament.id));
+        const eventIds = tournamentEvents.map(
+          (event: { id: string }) => event.id,
+        );
+
+        const assignedRows =
+          eventIds.length > 0
+            ? await db
+                .select({ courtName: matchTable.courtName })
+                .from(matchTable)
+                .where(
+                  and(
+                    inArray(matchTable.eventId, eventIds),
+                    ne(matchTable.id, matchId),
+                    notInArray(matchTable.matchState, [
+                      "completed",
+                      "abandoned",
+                      "walkover",
+                    ]),
+                  ),
+                )
+            : [];
+
+        const currentCourtName = match.courtName?.trim() || null;
+        const unavailableCourts = new Set(
+          assignedRows
+            .map((row) => row.courtName?.trim())
+            .filter(Boolean) as string[],
+        );
+        const courts = allCourts.filter(
+          (courtName) =>
+            courtName !== currentCourtName && !unavailableCourts.has(courtName),
+        );
+
+        return sendResponse({
+          success: true,
+          message: "Available courts fetched successfully",
+          data: {
+            currentCourtName,
+            courts,
+          },
+        });
+      },
+      {
+        params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .post(
+      "/assign-court/:matchId",
+      async ({ user, db, params: { matchId }, body, server }: any) => {
+        const match = await db.query.matchTable.findFirst({
+          where: { id: matchId },
+          with: {
+            event: {
+              with: {
+                tournament: true,
+              },
+            },
+          },
+        });
+
+        if (!match?.event?.tournament) {
+          return sendResponse({
+            success: false,
+            message: "Match or related tournament not found",
+          });
+        }
+
+        const [member] = await db
+          .select()
+          .from(organizationMemberTable)
+          .where(
+            and(
+              eq(
+                organizationMemberTable.organizationId,
+                match.event.tournament.organizationId,
+              ),
+              eq(organizationMemberTable.userId, user.id),
+            ),
+          )
+          .limit(1);
+
+        if (!member) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to assign courts for this match",
+          });
+        }
+
+        const courtName = body.courtName?.trim() || null;
+        if (courtName) {
+          const courtMatch = courtName.match(/^Court\s+(\d+)$/i);
+          const courtNumber = courtMatch ? Number(courtMatch[1]) : NaN;
+          const venueCourts = Number(match.event.tournament.venueCourts || 0);
+
+          if (
+            !courtMatch ||
+            Number.isNaN(courtNumber) ||
+            courtNumber < 1 ||
+            courtNumber > venueCourts
+          ) {
+            return sendResponse({
+              success: false,
+              message: "Selected court is not valid for this tournament",
+            });
+          }
+
+          const tournamentEvents = await db
+            .select({ id: eventTable.id })
+            .from(eventTable)
+            .where(eq(eventTable.tournamentId, match.event.tournament.id));
+          const eventIds = tournamentEvents.map(
+            (event: { id: string }) => event.id,
+          );
+          const [conflictingMatch] =
+            eventIds.length > 0
+              ? await db
+                  .select({ id: matchTable.id })
+                  .from(matchTable)
+                  .where(
+                    and(
+                      inArray(matchTable.eventId, eventIds),
+                      ne(matchTable.id, matchId),
+                      eq(matchTable.courtName, courtName),
+                      notInArray(matchTable.matchState, [
+                        "completed",
+                        "abandoned",
+                        "walkover",
+                      ]),
+                    ),
+                  )
+                  .limit(1)
+              : [];
+
+          if (conflictingMatch) {
+            return sendResponse({
+              success: false,
+              message:
+                "This court is already assigned to another active match",
+            });
+          }
+        }
+
+        await db
+          .update(matchTable)
+          .set({ courtName })
+          .where(eq(matchTable.id, matchId));
+
+        const tournamentId = match.event.tournament.id;
+        const broadcastData = {
+          type: "MATCH_COURT_UPDATE",
+          data: {
+            tournamentId,
+            matchId,
+            courtName,
+          },
+        };
+        server?.publish(`match:${matchId}`, JSON.stringify(broadcastData));
+        server?.publish(
+          `tournament:${tournamentId}`,
+          JSON.stringify(broadcastData),
+        );
+
+        return sendResponse({
+          success: true,
+          message: courtName
+            ? "Court assigned successfully"
+            : "Court removed successfully",
+          data: { courtName },
+        });
+      },
+      {
+        params: t.Object({ matchId: t.String({ format: "uuid" }) }),
+        body: t.Object({
+          courtName: t.Union([t.String(), t.Null()]),
+        }),
       },
     )
     .post(

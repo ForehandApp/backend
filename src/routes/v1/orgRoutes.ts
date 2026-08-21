@@ -433,7 +433,7 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
                 teamBScore: s.teamBScore,
                 setStatus: s.setStatus,
               })).sort((a: any, b: any) => a.setNumber - b.setNumber),
-              court: "Court TBD",
+              court: match.courtName || null,
               isLive: true,
             });
           });

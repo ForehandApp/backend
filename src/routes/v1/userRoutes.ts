@@ -298,6 +298,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             rightTeamPlayers: teamBPlayers,
             scheduledAt: match.startTime || match.createdAt,
             venue: match.event?.tournament?.venueName || "TBD",
+            court: match.courtName || null,
           };
         });
 
@@ -540,7 +541,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
               teamBScore: s.teamBScore,
               setStatus: s.setStatus,
             })).sort((a: any, b: any) => a.setNumber - b.setNumber),
-            court: "Court TBD", // Court is not in schema yet
+            court: match.courtName || null,
             isLive: true,
           });
         });
