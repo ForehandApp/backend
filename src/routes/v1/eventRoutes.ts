@@ -740,17 +740,38 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     .get(
       "/participants/:eventId",
       async ({ db, params: { eventId } }) => {
-        const participants = await db.query.teamTable.findMany({
-          where: ((table: any, { eq }: any) =>
-            eq(table.eventId, eventId)) as any,
-          with: {
-            participants: {
-              with: {
-                user: true,
-              },
-            },
-          },
-        });
+        const teams = await db
+          .select()
+          .from(teamTable)
+          .where(eq(teamTable.eventId, eventId));
+        const teamIds = teams.map((team) => team.id).filter(Boolean) as string[];
+
+        const participantRows = teamIds.length
+          ? await db
+              .select({
+                teamId: teamParticipantTable.teamId,
+                userId: teamParticipantTable.userId,
+                user: profileTable,
+              })
+              .from(teamParticipantTable)
+              .innerJoin(
+                profileTable,
+                eq(teamParticipantTable.userId, profileTable.id),
+              )
+              .where(inArray(teamParticipantTable.teamId, teamIds))
+          : [];
+
+        const participantsByTeamId = new Map<string, any[]>();
+        for (const row of participantRows as any[]) {
+          const current = participantsByTeamId.get(row.teamId) || [];
+          current.push({ userId: row.userId, user: row.user });
+          participantsByTeamId.set(row.teamId, current);
+        }
+
+        const participants = teams.map((team) => ({
+          ...team,
+          participants: participantsByTeamId.get(team.id) || [],
+        }));
 
         return sendResponse({
           success: true,

@@ -227,6 +227,17 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       "/update-score",
       async ({ user, db, body, server }: any) => {
         try {
+          console.log("[match/update-score] request", {
+            userId: user.id,
+            matchId: body.matchId,
+            setNumber: body.setNumber,
+            teamAScore: body.teamAScore,
+            teamBScore: body.teamBScore,
+            setStatus: body.setStatus,
+            winnerId: body.winnerId ?? null,
+            matchFinished: body.matchFinished ?? false,
+            matchWinnerId: body.matchWinnerId ?? null,
+          });
           const match = await db.query.matchTable.findFirst({
             where: ((table: any, { eq }: any) =>
               eq(table.id, body.matchId)) as any,
@@ -283,7 +294,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
 
             if (existingSet) {
-              await tx
+              const updatedSet = await tx
                 .update(setTable)
                 .set({
                   teamAScore: body.teamAScore,
@@ -291,16 +302,54 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   setStatus: body.setStatus,
                   winnerId: body.winnerId ?? null,
                 })
-                .where(eq(setTable.id, existingSet.id));
-            } else {
-              await tx.insert(setTable).values({
+                .where(
+                  and(
+                    eq(setTable.matchId, body.matchId),
+                    eq(setTable.setNumber, body.setNumber),
+                  ),
+                )
+                .returning();
+              console.log("[match/update-score] set updated", {
                 matchId: body.matchId,
                 setNumber: body.setNumber,
-                teamAScore: body.teamAScore,
-                teamBScore: body.teamBScore,
-                setStatus: body.setStatus,
-                winnerId: body.winnerId ?? null,
+                setRows: updatedSet,
               });
+            } else {
+              const insertedSet = await tx
+                .insert(setTable)
+                .values({
+                  matchId: body.matchId,
+                  setNumber: body.setNumber,
+                  teamAScore: body.teamAScore,
+                  teamBScore: body.teamBScore,
+                  setStatus: body.setStatus,
+                  winnerId: body.winnerId ?? null,
+                })
+                .returning();
+              console.log("[match/update-score] set inserted", {
+                matchId: body.matchId,
+                setNumber: body.setNumber,
+                setRows: insertedSet,
+              });
+            }
+
+            if (
+              match.matchState === "scheduled" &&
+              (body.setStatus === "in_progress" ||
+                body.teamAScore > 0 ||
+                body.teamBScore > 0)
+            ) {
+              await tx
+                .update(matchTable)
+                .set({ matchState: "in_progress" })
+                .where(eq(matchTable.id, body.matchId));
+
+              if (match.event.eventState !== "in_progress") {
+                await tx
+                  .update(eventTable)
+                  .set({ eventState: "in_progress" })
+                  .where(eq(eventTable.id, match.event.id));
+              }
             }
 
             // If match is finished, update match state and winner
@@ -432,9 +481,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       "/list/:eventId",
       async ({ db, params: { eventId } }) => {
         const matches = await db.query.matchTable.findMany({
-          where: { eventId: eventId },
+          where: ((table: any, { eq }: any) =>
+            eq(table.eventId, eventId)) as any,
           with: {
-            sets: true,
             teamAData: {
               with: {
                 participants: {
@@ -456,11 +505,38 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             scorerUser: true,
           },
         });
+        const matchIds = matches.map((match: any) => match.id);
+        const sets = matchIds.length
+          ? await db
+              .select()
+              .from(setTable)
+              .where(inArray(setTable.matchId, matchIds))
+          : [];
+        const setsByMatchId = new Map<string, any[]>();
+        (sets as any[]).forEach((set) => {
+          const current = setsByMatchId.get(set.matchId) || [];
+          current.push(set);
+          setsByMatchId.set(set.matchId, current);
+        });
+        console.log("[match/list] set rows fetched", {
+          eventId,
+          matchIds,
+          setRows: sets,
+        });
+        const matchesWithSets = (matches as any[]).map((match) => ({
+          ...match,
+          sets: (setsByMatchId.get(match.id) || []).sort(
+            (a: any, b: any) => a.setNumber - b.setNumber,
+          ),
+          setRows: (setsByMatchId.get(match.id) || []).sort(
+            (a: any, b: any) => a.setNumber - b.setNumber,
+          ),
+        }));
 
         return sendResponse({
           success: true,
           message: "Matches fetched successfully",
-          data: matches,
+          data: matchesWithSets,
         });
       },
       {
@@ -477,7 +553,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               eq(table.roundNumber, body.roundNumber),
             )) as any,
           with: {
-            sets: true,
             teamAData: {
               with: {
                 participants: {
@@ -499,11 +574,39 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             scorerUser: true,
           },
         });
+        const matchIds = matches.map((match: any) => match.id);
+        const sets = matchIds.length
+          ? await db
+              .select()
+              .from(setTable)
+              .where(inArray(setTable.matchId, matchIds))
+          : [];
+        const setsByMatchId = new Map<string, any[]>();
+        (sets as any[]).forEach((set) => {
+          const current = setsByMatchId.get(set.matchId) || [];
+          current.push(set);
+          setsByMatchId.set(set.matchId, current);
+        });
+        console.log("[match/list:round] set rows fetched", {
+          eventId,
+          roundNumber: body.roundNumber,
+          matchIds,
+          setRows: sets,
+        });
+        const matchesWithSets = (matches as any[]).map((match) => ({
+          ...match,
+          sets: (setsByMatchId.get(match.id) || []).sort(
+            (a: any, b: any) => a.setNumber - b.setNumber,
+          ),
+          setRows: (setsByMatchId.get(match.id) || []).sort(
+            (a: any, b: any) => a.setNumber - b.setNumber,
+          ),
+        }));
 
         return sendResponse({
           success: true,
           message: `Matches for event ${eventId} and round ${body.roundNumber} fetched successfully`,
-          data: matches,
+          data: matchesWithSets,
         });
       },
       {
@@ -1130,7 +1233,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             winner: true,
           },
         });
-
         if (!match) {
           return sendResponse({
             success: false,
@@ -1138,10 +1240,27 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
+        const setRows = await db
+          .select()
+          .from(setTable)
+          .where(eq(setTable.matchId, matchId));
+        console.log("[match/info] set rows fetched", {
+          matchId,
+          setRows,
+        });
+
         return sendResponse({
           success: true,
           message: "Match fetched successfully",
-          data: match,
+          data: {
+            ...match,
+            sets: (setRows as any[]).sort(
+              (a: any, b: any) => a.setNumber - b.setNumber,
+            ),
+            setRows: (setRows as any[]).sort(
+              (a: any, b: any) => a.setNumber - b.setNumber,
+            ),
+          },
         });
       },
       {
@@ -1629,7 +1748,8 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
       async ({ user, db }) => {
         try {
           const matches = await db.query.matchTable.findMany({
-            where: { scorer: user.id } as any,
+            where: ((table: any, { eq }: any) =>
+              eq(table.scorer, user.id)) as any,
             with: {
               sets: true,
               event: {

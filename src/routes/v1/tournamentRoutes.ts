@@ -979,6 +979,53 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 message: "Managed tournaments retrieved successfully",
                 data: tournaments,
               });
+            })
+            .get("/scorer", async ({ db, user }) => {
+              const scorerAssignments = await db
+                .select({
+                  tournamentId: tournamentVolunteerTable.tournamentId,
+                })
+                .from(tournamentVolunteerTable)
+                .where(
+                  and(
+                    eq(tournamentVolunteerTable.userId, user.id),
+                    eq(tournamentVolunteerTable.role, "scorer"),
+                  ),
+                );
+
+              const scorerTournamentIds = [
+                ...new Set(scorerAssignments.map((row) => row.tournamentId)),
+              ];
+
+              if (scorerTournamentIds.length === 0) {
+                return sendResponse({
+                  success: true,
+                  message: "No scorer tournaments found",
+                  data: [],
+                });
+              }
+
+              const tournaments = await db.query.tournamentTable.findMany({
+                where: ((table: any, { inArray }: any) =>
+                  inArray(table.id, scorerTournamentIds)) as any,
+                with: {
+                  events: {
+                    with: {
+                      sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
+                    },
+                  },
+                  organization: true,
+                },
+                orderBy: (table: any, { desc }: any) => [desc(table.createdAt)],
+              });
+
+              return sendResponse({
+                success: true,
+                message: "Scorer tournaments retrieved successfully",
+                data: tournaments,
+              });
             }),
         ),
     ),

@@ -403,6 +403,17 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
             const currentSet =
               match.sets.find((s: any) => s.setStatus === "in_progress") ||
               match.sets[match.sets.length - 1];
+            const setsWon = (match.sets || []).reduce(
+              (score: { teamA: number; teamB: number }, set: any) => {
+                if (set.setStatus !== "completed") return score;
+                if (set.winnerId === match.teamA) score.teamA += 1;
+                else if (set.winnerId === match.teamB) score.teamB += 1;
+                else if (set.teamAScore > set.teamBScore) score.teamA += 1;
+                else if (set.teamBScore > set.teamAScore) score.teamB += 1;
+                return score;
+              },
+              { teamA: 0, teamB: 0 },
+            );
 
             const teamAPlayers = match.teamAData.participants.map(
               (p: any) => p.user.name,
@@ -423,8 +434,8 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
                 players: teamBPlayers,
               },
               score: {
-                teamA: currentSet ? currentSet.teamAScore : 0,
-                teamB: currentSet ? currentSet.teamBScore : 0,
+                teamA: setsWon.teamA,
+                teamB: setsWon.teamB,
                 currentSet: currentSet ? currentSet.setNumber : 1,
               },
               sets: (match.sets || []).map((s: any) => ({
@@ -432,6 +443,7 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
                 teamAScore: s.teamAScore,
                 teamBScore: s.teamBScore,
                 setStatus: s.setStatus,
+                winnerId: s.winnerId,
               })).sort((a: any, b: any) => a.setNumber - b.setNumber),
               court: match.courtName || null,
               isLive: true,

@@ -9,6 +9,7 @@ import {
   eventTable,
   tournamentInvitesTable,
   tournamentTable,
+  teamTable,
   matchTable,
   teamParticipantTable,
   teamTypesTable,
@@ -16,7 +17,7 @@ import {
 } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
-import { eq, and, ne, desc, asc, or, inArray } from "drizzle-orm";
+import { eq, and, ne, desc, asc, or, inArray, notInArray } from "drizzle-orm";
 import { t } from "elysia";
 
 export const userRoutes = protectedApi.group("/user", (app) =>
@@ -120,11 +121,15 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           });
         }
 
-        // 2. Fetch the most recent in_progress match
-        const matchResult = await db.query.matchTable.findFirst({
+        // 2. Fetch active candidate matches and derive live state from match/set data.
+        const matchCandidates = await db.query.matchTable.findMany({
           where: ((table: any, { and, or, eq }: any) =>
             and(
-              eq(table.matchState, "in_progress"),
+              notInArray(table.matchState, [
+                "completed",
+                "abandoned",
+                "walkover",
+              ]),
               or(
                 ...teamIds.map((id) => eq(table.teamA, id)),
                 ...teamIds.map((id) => eq(table.teamB, id)),
@@ -160,7 +165,12 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           orderBy: (table: any, { desc }: any) => [desc(table.updatedAt)],
         });
 
-        const match = matchResult as any;
+        const match = (matchCandidates as any[]).find((candidate: any) => {
+          const hasLiveSet = (candidate.sets || []).some(
+            (set: any) => set.setStatus === "in_progress",
+          );
+          return candidate.matchState === "in_progress" || hasLiveSet;
+        });
 
         if (!match) {
           return sendResponse({
@@ -182,6 +192,8 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           if (s.setStatus === "completed") {
             if (s.winnerId === match.teamA) teamASets++;
             else if (s.winnerId === match.teamB) teamBSets++;
+            else if (s.teamAScore > s.teamBScore) teamASets++;
+            else if (s.teamBScore > s.teamAScore) teamBSets++;
           }
         });
 
@@ -192,19 +204,48 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           p.user.id === user.id ? "You" : p.user.name,
         );
 
+        const sortedSets = [...(match.sets || [])].sort(
+          (a: any, b: any) => a.setNumber - b.setNumber,
+        );
         const data = {
           id: match.id,
+          tournamentId: match.event!.tournament.id,
+          tournamentName: match.event!.tournament.name,
+          matchTitle: `${match.event!.name} · Match #${String(match.id).split("-")[0]}`,
           type: match.teamAData.teamType.label,
           leagueTitle: match.event!.tournament.name,
+          teamA: {
+            players: teamAPlayers,
+            images: match.teamAData.participants
+              .map((p: any) => p.user.profilePicUrl)
+              .filter(Boolean),
+          },
+          teamB: {
+            players: teamBPlayers,
+            images: match.teamBData.participants
+              .map((p: any) => p.user.profilePicUrl)
+              .filter(Boolean),
+          },
           leftTeamName: teamAPlayers.join(" & "),
           rightTeamName: teamBPlayers.join(" & "),
           leftTeamPlayers: teamAPlayers,
           rightTeamPlayers: teamBPlayers,
-          score: currentSet
-            ? `${currentSet.teamAScore} - ${currentSet.teamBScore}`
-            : "0 - 0",
+          score: {
+            teamA: teamASets,
+            teamB: teamBSets,
+            currentSet: currentSet ? currentSet.setNumber : 1,
+          },
           scoreLabel: currentSet ? `Set ${currentSet.setNumber}` : "Warm up",
           matchScore: `${teamASets} - ${teamBSets}`,
+          sets: sortedSets.map((s: any) => ({
+            setNumber: s.setNumber,
+            teamAScore: s.teamAScore,
+            teamBScore: s.teamBScore,
+            setStatus: s.setStatus,
+            winnerId: s.winnerId,
+          })),
+          court: match.courtName || null,
+          isLive: true,
         };
 
         return sendResponse({
@@ -428,28 +469,32 @@ export const userRoutes = protectedApi.group("/user", (app) =>
     })
     .get("/matches/live-feed", async ({ user, db }) => {
       try {
-        // 1. Get all tournament IDs the user has joined
-        // First find all teams the user is part of
-        const userTeams = await db.query.teamParticipantTable.findMany({
-          where: { userId: user.id },
-          with: {
-            team: {
-              with: {
-                event: true,
-              },
-            },
-          },
-        });
+        // 1. Get tournaments the user has joined through any event team.
+        const joinedTournamentRows = await db
+          .select({ tournamentId: eventTable.tournamentId })
+          .from(teamParticipantTable)
+          .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+          .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+          .where(eq(teamParticipantTable.userId, user.id));
 
-        const tournamentIds = Array.from(
-          new Set(
-            userTeams
-              .map((ut: any) => ut.team?.event?.tournamentId)
-              .filter(Boolean),
-          ),
-        );
+        const joinedTournamentIds = [
+          ...new Set(joinedTournamentRows.map((row) => row.tournamentId)),
+        ];
 
-        if (tournamentIds.length === 0) {
+        const scorerTournamentRows = await db
+          .select({ tournamentId: eventTable.tournamentId })
+          .from(matchTable)
+          .innerJoin(eventTable, eq(matchTable.eventId, eventTable.id))
+          .where(eq(matchTable.scorer, user.id));
+
+        const liveFeedTournamentIds = [
+          ...new Set([
+            ...joinedTournamentIds,
+            ...scorerTournamentRows.map((row) => row.tournamentId),
+          ]),
+        ];
+
+        if (liveFeedTournamentIds.length === 0) {
           return sendResponse({
             success: true,
             message: "No live matches found",
@@ -457,20 +502,34 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           });
         }
 
-        // 2. Fetch all in_progress matches for these tournaments
-        const liveMatches = await db.query.matchTable.findMany({
-          where: ((match: any, { eq, and, inArray }: any) =>
+        const joinedTournamentEvents = await db
+          .select({ eventId: eventTable.id })
+          .from(eventTable)
+          .where(inArray(eventTable.tournamentId, liveFeedTournamentIds));
+
+        const joinedTournamentEventIds = joinedTournamentEvents.map(
+          (row) => row.eventId,
+        );
+
+        if (joinedTournamentEventIds.length === 0) {
+          return sendResponse({
+            success: true,
+            message: "No live matches found",
+            data: [],
+          });
+        }
+
+        // 2. Fetch live candidates from those tournaments, including matches
+        // where the current user is just a spectator.
+        const liveMatchCandidates = await db.query.matchTable.findMany({
+          where: ((match: any, { and, inArray, notInArray }: any) =>
             and(
-              eq(match.matchState, "in_progress"),
-              inArray(
-                match.eventId,
-                db
-                  .select({ id: eventTable.id })
-                  .from(eventTable)
-                  .where(
-                    inArray(eventTable.tournamentId, tournamentIds as string[]),
-                  ),
-              ),
+              notInArray(match.matchState, [
+                "completed",
+                "abandoned",
+                "walkover",
+              ]),
+              inArray(match.eventId, joinedTournamentEventIds),
             )) as any,
           with: {
             event: {
@@ -498,7 +557,45 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             },
             sets: true,
           },
+          orderBy: (table: any, { desc }: any) => [desc(table.updatedAt)],
         });
+        const getActiveSets = (sets: any[] = []) => {
+          const statusRank: Record<string, number> = {
+            in_progress: 3,
+            completed: 2,
+            not_started: 1,
+          };
+          const byNumber = new Map<number, any>();
+
+          sets.forEach((set: any) => {
+            const existing = byNumber.get(set.setNumber);
+            const setRank = statusRank[set.setStatus] ?? 0;
+            const existingRank = existing
+              ? statusRank[existing.setStatus] ?? 0
+              : -1;
+
+            if (!existing || setRank > existingRank) {
+              byNumber.set(set.setNumber, set);
+            }
+          });
+
+          return [...byNumber.values()].sort(
+            (a: any, b: any) => a.setNumber - b.setNumber,
+          );
+        };
+
+        const hasLiveSetActivity = (sets: any[] = []) =>
+          getActiveSets(sets).some(
+            (set: any) =>
+              set.setStatus === "in_progress" ||
+              set.setStatus === "completed" ||
+              set.teamAScore > 0 ||
+              set.teamBScore > 0,
+          );
+
+        const liveMatches = (liveMatchCandidates as any[]).filter(
+          (match: any) => hasLiveSetActivity(match.sets || []),
+        );
 
         // 3. Group by tournament
         const groupedData: Record<string, any> = {};
@@ -513,34 +610,63 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             };
           }
 
+          const activeSets = getActiveSets(match.sets || []);
           const currentSet =
-            match.sets.find((s: any) => s.setStatus === "in_progress") ||
-            match.sets[match.sets.length - 1];
+            activeSets.find((s: any) => s.setStatus === "in_progress") ||
+            [...activeSets]
+              .filter(
+                (s: any) =>
+                  s.setStatus !== "not_started" ||
+                  s.teamAScore > 0 ||
+                  s.teamBScore > 0,
+              )
+              .sort((a: any, b: any) => b.setNumber - a.setNumber)[0] ||
+            activeSets[0];
+          const setsWon = activeSets.reduce(
+            (score: { teamA: number; teamB: number }, set: any) => {
+              if (set.setStatus !== "completed") return score;
+              if (set.winnerId === match.teamA) score.teamA += 1;
+              else if (set.winnerId === match.teamB) score.teamB += 1;
+              else if (set.teamAScore > set.teamBScore) score.teamA += 1;
+              else if (set.teamBScore > set.teamAScore) score.teamB += 1;
+              return score;
+            },
+            { teamA: 0, teamB: 0 },
+          );
 
           groupedData[tournamentId].matches.push({
             id: match.id,
             matchTitle: `${match.event.name} · Match #${match.id.split("-")[0]}`,
+            matchState: match.matchState,
             teamA: {
               players: match.teamAData.participants.map((p: any) =>
                 p.user.id === user.id ? "You" : p.user.name,
               ),
+              images: match.teamAData.participants
+                .map((p: any) => p.user.profilePicUrl)
+                .filter(Boolean),
             },
             teamB: {
               players: match.teamBData.participants.map((p: any) =>
                 p.user.id === user.id ? "You" : p.user.name,
               ),
+              images: match.teamBData.participants
+                .map((p: any) => p.user.profilePicUrl)
+                .filter(Boolean),
             },
             score: {
-              teamA: currentSet ? currentSet.teamAScore : 0,
-              teamB: currentSet ? currentSet.teamBScore : 0,
+              teamA: setsWon.teamA,
+              teamB: setsWon.teamB,
               currentSet: currentSet ? currentSet.setNumber : 1,
             },
-            sets: (match.sets || []).map((s: any) => ({
+            sets: activeSets.map((s: any) => ({
+              id: s.id,
               setNumber: s.setNumber,
               teamAScore: s.teamAScore,
               teamBScore: s.teamBScore,
               setStatus: s.setStatus,
-            })).sort((a: any, b: any) => a.setNumber - b.setNumber),
+              winnerId: s.winnerId,
+            })),
             court: match.courtName || null,
             isLive: true,
           });
