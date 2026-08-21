@@ -31,10 +31,12 @@ export const apiV1 = new Elysia().group("v1", (app) =>
       async open(ws) {
         const token = ws.data.query.token;
         if (!token) {
-          ws.send({
-            type: "ERROR",
-            message: "Unauthorized: No token provided",
-          });
+          ws.send(
+            JSON.stringify({
+              type: "ERROR",
+              message: "Unauthorized: No token provided",
+            }),
+          );
           ws.close();
           return;
         }
@@ -44,34 +46,36 @@ export const apiV1 = new Elysia().group("v1", (app) =>
           error,
         } = await supabase.auth.getUser(token);
         if (error || !user) {
-          ws.send({ type: "ERROR", message: "Unauthorized: Invalid token" });
+          ws.send(
+            JSON.stringify({
+              type: "ERROR",
+              message: "Unauthorized: Invalid token",
+            }),
+          );
           ws.close();
           return;
         }
 
         // User authenticated
         (ws.data as any).user = user;
-        ws.send({ type: "AUTH_SUCCESS", message: "Authenticated" });
-        console.log(`WS: User ${user.id} connected`);
+        ws.send(JSON.stringify({ type: "AUTH_SUCCESS", message: "Authenticated" }));
       },
       message(ws, message: any) {
         const user = (ws.data as any).user;
         if (!user) return;
+        const payload =
+          typeof message === "string" ? JSON.parse(message) : message;
 
-        if (message.type === "SUBSCRIBE_MATCH") {
-          const matchId = message.matchId;
+        if (payload.type === "SUBSCRIBE_MATCH") {
+          const matchId = payload.matchId;
           ws.subscribe(`match:${matchId}`);
-          ws.send({ type: "SUBSCRIBED", matchId });
-          console.log(`WS: User ${user.id} subscribed to match:${matchId}`);
+          ws.send(JSON.stringify({ type: "SUBSCRIBED", matchId }));
         }
 
-        if (message.type === "SUBSCRIBE_TOURNAMENT") {
-          const tournamentId = message.tournamentId;
+        if (payload.type === "SUBSCRIBE_TOURNAMENT") {
+          const tournamentId = payload.tournamentId;
           ws.subscribe(`tournament:${tournamentId}`);
-          ws.send({ type: "SUBSCRIBED_TOURNAMENT", tournamentId });
-          console.log(
-            `WS: User ${user.id} subscribed to tournament:${tournamentId}`,
-          );
+          ws.send(JSON.stringify({ type: "SUBSCRIBED_TOURNAMENT", tournamentId }));
         }
       },
     }),

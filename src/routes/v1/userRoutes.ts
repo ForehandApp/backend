@@ -132,15 +132,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
 
         const teamIds = userTeams.map((t) => t.teamId);
 
-        if (teamIds.length === 0) {
-          return sendResponse({
-            success: true,
-            message: "No live match found",
-            data: null,
-          });
-        }
-
-        // 2. Fetch active candidate matches and derive live state from match/set data.
+        // 2. Fetch active candidate matches where the user is a player or scorer.
         const matchCandidates = await db.query.matchTable.findMany({
           where: ((table: any, { and, or, eq }: any) =>
             and(
@@ -150,6 +142,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
                 "walkover",
               ]),
               or(
+                eq(table.scorer, user.id),
                 ...teamIds.map((id) => eq(table.teamA, id)),
                 ...teamIds.map((id) => eq(table.teamB, id)),
               ),
@@ -613,7 +606,9 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           );
 
         const liveMatches = (liveMatchCandidates as any[]).filter(
-          (match: any) => hasLiveSetActivity(match.sets || []),
+          (match: any) =>
+            match.matchState === "in_progress" ||
+            hasLiveSetActivity(match.sets || []),
         );
 
         // 3. Group by tournament
