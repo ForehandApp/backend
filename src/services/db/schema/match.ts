@@ -4,6 +4,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { eventTable, teamTable } from "./tournament";
@@ -49,20 +50,29 @@ export const matchTable = pgTable.withRLS("match_table", {
   updatedAt,
 });
 
-export const setTable = pgTable.withRLS("set_table", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  matchId: uuid("match_id")
-    .notNull()
-    .references(() => matchTable.id),
+export const setTable = pgTable.withRLS(
+  "set_table",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    matchId: uuid("match_id")
+      .notNull()
+      .references(() => matchTable.id),
 
-  setStatus: setStateEnum("set_status").notNull().default("not_started"),
-  setNumber: integer("set_integer").notNull(),
+    setStatus: setStateEnum("set_status").notNull().default("not_started"),
+    setNumber: integer("set_integer").notNull(),
 
-  teamAScore: integer("team_a_score").notNull(),
-  teamBScore: integer("team_b_score").notNull(),
+    teamAScore: integer("team_a_score").notNull(),
+    teamBScore: integer("team_b_score").notNull(),
 
-  winnerId: uuid("winner_id").references(() => teamTable.id),
+    winnerId: uuid("winner_id").references(() => teamTable.id),
 
-  createdAt,
-  updatedAt,
-});
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    uniqueIndex("set_table_match_id_set_integer_unique").on(
+      table.matchId,
+      table.setNumber,
+    ),
+  ],
+);

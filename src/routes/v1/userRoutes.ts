@@ -41,6 +41,46 @@ function getDbErrorDetails(error: unknown) {
   };
 }
 
+function normalizeSetRows(sets: any[] = []) {
+  const statusRank: Record<string, number> = {
+    in_progress: 3,
+    completed: 2,
+    not_started: 1,
+  };
+  const byNumber = new Map<number, any>();
+
+  sets.forEach((set) => {
+    const setNumber = Number(set?.setNumber);
+    if (!Number.isFinite(setNumber)) return;
+
+    const existing = byNumber.get(setNumber);
+    const setRank = statusRank[set?.setStatus] ?? 0;
+    const existingRank = existing ? statusRank[existing?.setStatus] ?? 0 : -1;
+    const setScore = Number(set?.teamAScore || 0) + Number(set?.teamBScore || 0);
+    const existingScore = existing
+      ? Number(existing?.teamAScore || 0) + Number(existing?.teamBScore || 0)
+      : -1;
+    const setTime = new Date(set?.updatedAt || set?.createdAt || 0).getTime();
+    const existingTime = existing
+      ? new Date(existing?.updatedAt || existing?.createdAt || 0).getTime()
+      : -1;
+
+    if (
+      !existing ||
+      setRank > existingRank ||
+      (setRank === existingRank &&
+        (setScore > existingScore ||
+          (setScore === existingScore && setTime >= existingTime)))
+    ) {
+      byNumber.set(setNumber, set);
+    }
+  });
+
+  return [...byNumber.values()].sort(
+    (a: any, b: any) => a.setNumber - b.setNumber,
+  );
+}
+
 export const userRoutes = protectedApi.group("/user", (app) =>
   app
     .get("/profile", async ({ user, db }) => {
@@ -151,6 +191,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             event: {
               with: {
                 tournament: true,
+                teamType: true,
               },
             },
             teamAData: {
@@ -305,6 +346,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             event: {
               with: {
                 tournament: true,
+                teamType: true,
               },
             },
             teamAData: {
@@ -342,7 +384,11 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             id: match.id,
             eventId: match.eventId,
             tournamentId: match.event?.tournamentId,
-            type: match.teamAData?.teamType?.label || "Match",
+            type:
+              match.event?.teamType?.label ||
+              match.teamAData?.teamType?.label ||
+              "Match",
+            matchState: match.matchState,
             leagueTitle: match.event?.tournament?.name || "Tournament",
             eventName: match.event?.name || "Event",
             leftTeamName: teamAPlayers.join(" & ") || match.teamAData?.name,
@@ -401,6 +447,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             event: {
               with: {
                 tournament: true,
+                teamType: true,
               },
             },
             teamAData: {
@@ -443,17 +490,30 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             p.user.id === user.id ? "You" : p.user.name,
           );
 
-          // Get final score from sets
-          let teamAScore = 0;
-          let teamBScore = 0;
-          match.sets.forEach((set: any) => {
-            if (set.winnerId === match.teamA) teamAScore++;
-            if (set.winnerId === match.teamB) teamBScore++;
-          });
+          const setRows = normalizeSetRows(match.sets || []);
+          const completedSets = setRows.filter(
+            (set: any) => set.setStatus === "completed",
+          );
+          const matchScore = completedSets.reduce(
+            (score: { teamA: number; teamB: number }, set: any) => {
+              if (set.winnerId === match.teamA) score.teamA += 1;
+              else if (set.winnerId === match.teamB) score.teamB += 1;
+              else if (Number(set.teamAScore) > Number(set.teamBScore)) {
+                score.teamA += 1;
+              } else if (Number(set.teamBScore) > Number(set.teamAScore)) {
+                score.teamB += 1;
+              }
+              return score;
+            },
+            { teamA: 0, teamB: 0 },
+          );
 
           return {
             id: match.id,
-            type: match.teamAData.teamType.label,
+            type:
+              match.event?.teamType?.label ||
+              match.teamAData?.teamType?.label ||
+              "Match",
             endedAt: match.updatedAt,
             status,
             leagueTitle: match.event!.tournament.name,
@@ -461,8 +521,16 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             rightTeamName: teamBPlayers.join(" & "),
             leftTeamPlayers: teamAPlayers,
             rightTeamPlayers: teamBPlayers,
-            score: `${teamAScore} - ${teamBScore}`,
+            score: matchScore,
             scoreLabel: "Final Score",
+            matchState: match.matchState,
+            sets: setRows.map((set: any) => ({
+              setNumber: set.setNumber,
+              teamAScore: set.teamAScore,
+              teamBScore: set.teamBScore,
+              setStatus: set.setStatus,
+              winnerId: set.winnerId,
+            })),
           };
         });
 

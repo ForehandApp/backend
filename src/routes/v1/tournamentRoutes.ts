@@ -786,12 +786,6 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 },
               });
 
-              console.log(
-                "Tournaments: ",
-                tournaments.map((t) => t.id),
-              );
-              console.log("Joined tournament IDs: ", joinedTournamentIds);
-
               const filtered = tournaments.filter((t) => {
                 if (joinedTournamentIds.has(t.id)) return false;
 

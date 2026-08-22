@@ -12,6 +12,46 @@ import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, notInArray, ne } from "drizzle-orm";
 import { t } from "elysia";
 
+function normalizeSetRows(sets: any[] = []) {
+  const statusRank: Record<string, number> = {
+    in_progress: 3,
+    completed: 2,
+    not_started: 1,
+  };
+  const byNumber = new Map<number, any>();
+
+  sets.forEach((set) => {
+    const setNumber = Number(set?.setNumber);
+    if (!Number.isFinite(setNumber)) return;
+
+    const existing = byNumber.get(setNumber);
+    const setRank = statusRank[set?.setStatus] ?? 0;
+    const existingRank = existing ? statusRank[existing?.setStatus] ?? 0 : -1;
+    const setScore = Number(set?.teamAScore || 0) + Number(set?.teamBScore || 0);
+    const existingScore = existing
+      ? Number(existing?.teamAScore || 0) + Number(existing?.teamBScore || 0)
+      : -1;
+    const setTime = new Date(set?.updatedAt || set?.createdAt || 0).getTime();
+    const existingTime = existing
+      ? new Date(existing?.updatedAt || existing?.createdAt || 0).getTime()
+      : -1;
+
+    if (
+      !existing ||
+      setRank > existingRank ||
+      (setRank === existingRank &&
+        (setScore > existingScore ||
+          (setScore === existingScore && setTime >= existingTime)))
+    ) {
+      byNumber.set(setNumber, set);
+    }
+  });
+
+  return [...byNumber.values()].sort(
+    (a: any, b: any) => a.setNumber - b.setNumber,
+  );
+}
+
 export const matchRoutes = protectedApi.group("/match", (app) =>
   app
     .post(
@@ -273,44 +313,26 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           }
 
           await db.transaction(async (tx: any) => {
-            // Check if set already exists
-            const existingSet = await tx.query.setTable.findFirst({
-              where: ((table: any, { eq, and }: any) =>
-                and(
-                  eq(table.matchId, body.matchId),
-                  eq(table.setNumber, body.setNumber),
-                )) as any,
-            });
-
-            if (existingSet) {
-              await tx
-                .update(setTable)
-                .set({
+            await tx
+              .insert(setTable)
+              .values({
+                matchId: body.matchId,
+                setNumber: body.setNumber,
+                teamAScore: body.teamAScore,
+                teamBScore: body.teamBScore,
+                setStatus: body.setStatus,
+                winnerId: body.winnerId ?? null,
+              })
+              .onConflictDoUpdate({
+                target: [setTable.matchId, setTable.setNumber],
+                set: {
                   teamAScore: body.teamAScore,
                   teamBScore: body.teamBScore,
                   setStatus: body.setStatus,
                   winnerId: body.winnerId ?? null,
-                })
-                .where(
-                  and(
-                    eq(setTable.matchId, body.matchId),
-                    eq(setTable.setNumber, body.setNumber),
-                  ),
-                )
-                .returning();
-            } else {
-              await tx
-                .insert(setTable)
-                .values({
-                  matchId: body.matchId,
-                  setNumber: body.setNumber,
-                  teamAScore: body.teamAScore,
-                  teamBScore: body.teamBScore,
-                  setStatus: body.setStatus,
-                  winnerId: body.winnerId ?? null,
-                })
-                .returning();
-            }
+                },
+              })
+              .returning();
 
             if (
               match.matchState === "scheduled" &&
@@ -497,15 +519,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           current.push(set);
           setsByMatchId.set(set.matchId, current);
         });
-        const matchesWithSets = (matches as any[]).map((match) => ({
-          ...match,
-          sets: (setsByMatchId.get(match.id) || []).sort(
-            (a: any, b: any) => a.setNumber - b.setNumber,
-          ),
-          setRows: (setsByMatchId.get(match.id) || []).sort(
-            (a: any, b: any) => a.setNumber - b.setNumber,
-          ),
-        }));
+        const matchesWithSets = (matches as any[]).map((match) => {
+          const normalizedSets = normalizeSetRows(setsByMatchId.get(match.id) || []);
+          return {
+            ...match,
+            sets: normalizedSets,
+            setRows: normalizedSets,
+          };
+        });
 
         return sendResponse({
           success: true,
@@ -561,15 +582,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           current.push(set);
           setsByMatchId.set(set.matchId, current);
         });
-        const matchesWithSets = (matches as any[]).map((match) => ({
-          ...match,
-          sets: (setsByMatchId.get(match.id) || []).sort(
-            (a: any, b: any) => a.setNumber - b.setNumber,
-          ),
-          setRows: (setsByMatchId.get(match.id) || []).sort(
-            (a: any, b: any) => a.setNumber - b.setNumber,
-          ),
-        }));
+        const matchesWithSets = (matches as any[]).map((match) => {
+          const normalizedSets = normalizeSetRows(setsByMatchId.get(match.id) || []);
+          return {
+            ...match,
+            sets: normalizedSets,
+            setRows: normalizedSets,
+          };
+        });
 
         return sendResponse({
           success: true,
@@ -1218,12 +1238,8 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           message: "Match fetched successfully",
           data: {
             ...match,
-            sets: (setRows as any[]).sort(
-              (a: any, b: any) => a.setNumber - b.setNumber,
-            ),
-            setRows: (setRows as any[]).sort(
-              (a: any, b: any) => a.setNumber - b.setNumber,
-            ),
+            sets: normalizeSetRows(setRows as any[]),
+            setRows: normalizeSetRows(setRows as any[]),
           },
         });
       },
@@ -1638,22 +1654,6 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
           }
 
-          const existingSet = await db.query.setTable.findFirst({
-            where: ((table: any, { eq, and }: any) =>
-              and(
-                eq(table.matchId, body.matchId),
-                eq(table.setNumber, body.setNumber),
-              )) as any,
-          });
-
-          if (existingSet) {
-            return sendResponse({
-              success: true,
-              message: "Set already exists",
-              data: { setId: existingSet.id },
-            });
-          }
-
           const insertedSet = await db
             .insert(setTable)
             .values({
@@ -1663,9 +1663,22 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               teamBScore: 0,
               setStatus: "not_started",
             })
+            .onConflictDoNothing({
+              target: [setTable.matchId, setTable.setNumber],
+            })
             .returning({ id: setTable.id });
 
-          const setId = insertedSet[0]!.id;
+          const existingSet =
+            insertedSet[0] ||
+            (await db.query.setTable.findFirst({
+              where: ((table: any, { eq, and }: any) =>
+                and(
+                  eq(table.matchId, body.matchId),
+                  eq(table.setNumber, body.setNumber),
+                )) as any,
+            }));
+
+          const setId = existingSet!.id;
 
           // Broadcast set initialization
           const tournamentId = match.event!.tournament!.id;
