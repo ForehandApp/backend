@@ -12,6 +12,12 @@ import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, notInArray, ne } from "drizzle-orm";
 import { t } from "elysia";
 
+function nullableUuid(value: unknown) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function normalizeSetRows(sets: any[] = []) {
   const statusRank: Record<string, number> = {
     in_progress: 3,
@@ -312,27 +318,41 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
           }
 
+          const setWinnerId = nullableUuid(body.winnerId);
+          const matchWinnerId = nullableUuid(body.matchWinnerId);
+
           await db.transaction(async (tx: any) => {
-            await tx
-              .insert(setTable)
-              .values({
+            const existingSet = await tx
+              .select({ id: setTable.id })
+              .from(setTable)
+              .where(
+                and(
+                  eq(setTable.matchId, body.matchId),
+                  eq(setTable.setNumber, body.setNumber),
+                ),
+              )
+              .limit(1);
+
+            if (existingSet[0]?.id) {
+              await tx
+                .update(setTable)
+                .set({
+                  teamAScore: body.teamAScore,
+                  teamBScore: body.teamBScore,
+                  setStatus: body.setStatus,
+                  winnerId: setWinnerId,
+                })
+                .where(eq(setTable.id, existingSet[0].id));
+            } else {
+              await tx.insert(setTable).values({
                 matchId: body.matchId,
                 setNumber: body.setNumber,
                 teamAScore: body.teamAScore,
                 teamBScore: body.teamBScore,
                 setStatus: body.setStatus,
-                winnerId: body.winnerId ?? null,
-              })
-              .onConflictDoUpdate({
-                target: [setTable.matchId, setTable.setNumber],
-                set: {
-                  teamAScore: body.teamAScore,
-                  teamBScore: body.teamBScore,
-                  setStatus: body.setStatus,
-                  winnerId: body.winnerId ?? null,
-                },
-              })
-              .returning();
+                winnerId: setWinnerId,
+              });
+            }
 
             if (
               match.matchState === "scheduled" &&
@@ -354,16 +374,16 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             }
 
             // If match is finished, update match state and winner
-            if (body.matchFinished && body.matchWinnerId) {
+            if (body.matchFinished && matchWinnerId) {
               const loserId =
-                body.matchWinnerId === match.teamA ? match.teamB : match.teamA;
+                matchWinnerId === match.teamA ? match.teamB : match.teamA;
 
               // 1. Update match state and winner
               await tx
                 .update(matchTable)
                 .set({
                   matchState: "completed",
-                  winnerId: body.matchWinnerId,
+                  winnerId: matchWinnerId,
                 })
                 .where(eq(matchTable.id, body.matchId));
 
@@ -435,7 +455,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               teamBScore: body.teamBScore,
               setStatus: body.setStatus,
               matchFinished: body.matchFinished,
-              matchWinnerId: body.matchWinnerId,
+              matchWinnerId,
             },
           };
           server?.publish(
@@ -1654,29 +1674,28 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
           }
 
-          const insertedSet = await db
-            .insert(setTable)
-            .values({
-              matchId: body.matchId,
-              setNumber: body.setNumber,
-              teamAScore: 0,
-              teamBScore: 0,
-              setStatus: "not_started",
-            })
-            .onConflictDoNothing({
-              target: [setTable.matchId, setTable.setNumber],
-            })
-            .returning({ id: setTable.id });
+          let existingSet = await db.query.setTable.findFirst({
+            where: ((table: any, { eq, and }: any) =>
+              and(
+                eq(table.matchId, body.matchId),
+                eq(table.setNumber, body.setNumber),
+              )) as any,
+          });
 
-          const existingSet =
-            insertedSet[0] ||
-            (await db.query.setTable.findFirst({
-              where: ((table: any, { eq, and }: any) =>
-                and(
-                  eq(table.matchId, body.matchId),
-                  eq(table.setNumber, body.setNumber),
-                )) as any,
-            }));
+          if (!existingSet) {
+            const insertedSet = await db
+              .insert(setTable)
+              .values({
+                matchId: body.matchId,
+                setNumber: body.setNumber,
+                teamAScore: 0,
+                teamBScore: 0,
+                setStatus: "not_started",
+              })
+              .returning({ id: setTable.id });
+
+            existingSet = insertedSet[0];
+          }
 
           const setId = existingSet!.id;
 
