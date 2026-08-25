@@ -1183,10 +1183,16 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             id: invitesTable.id,
             inviteState: invitesTable.inviteState,
             createdAt: invitesTable.createdAt,
+            updatedAt: invitesTable.updatedAt,
             senderName: profileTable.name,
             type: inviteTypeTable.code,
+            organizationId: organizationInvitesTable.organizationId,
             orgName: organizationTable.name,
+            eventId: eventInvitesTable.eventId,
+            eventTournamentId: eventTable.tournamentId,
             eventName: eventTable.name,
+            tournamentId: tournamentInvitesTable.tournamentId,
+            role: tournamentInvitesTable.role,
             tournamentName: tournamentTable.name,
           })
           .from(invitesTable)
@@ -1219,25 +1225,52 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           .where(
             and(
               eq(invitesTable.receiverId, user.id),
-              eq(invitesTable.inviteState, "pending"),
+              or(
+                eq(invitesTable.inviteState, "pending"),
+                and(
+                  or(
+                    eq(invitesTable.inviteState, "accepted"),
+                    eq(invitesTable.inviteState, "rejected"),
+                  ),
+                  sql`${invitesTable.updatedAt} >= now() - interval '3 days'`,
+                ),
+              ),
             ),
           )
-          .orderBy(desc(invitesTable.createdAt));
+          .orderBy(desc(invitesTable.updatedAt));
 
         const data = rows.map((row) => ({
           id: row.id,
           inviteId: row.id,
           type: "invite",
+          inviteState: row.inviteState,
+          contextType: row.type,
+          organizationId: row.organizationId,
+          eventId: row.eventId,
+          tournamentId: row.tournamentId || row.eventTournamentId,
+          role: row.role,
           title:
             row.type === "organization"
               ? "Organization Invite"
               : row.type === "event"
                 ? "Team Invitation"
-                : "Tournament Crew Invite",
-          body: `${row.senderName} has invited you.`,
+                : row.role === "scorer"
+                  ? "Scorer Invitation"
+                  : row.role === "admin"
+                    ? "Admin Invitation"
+                    : "Tournament Crew Invite",
+          body:
+            row.inviteState === "accepted"
+              ? `${row.senderName}'s invite was accepted.`
+              : row.inviteState === "rejected"
+                ? `${row.senderName}'s invite was rejected.`
+                : row.type === "tournament" && row.role
+                  ? `${row.senderName} invited you as ${row.role}.`
+                  : `${row.senderName} has invited you.`,
           source: row.orgName || row.eventName || row.tournamentName || "",
           createdAt: row.createdAt,
-          unread: true,
+          updatedAt: row.updatedAt,
+          unread: row.inviteState === "pending",
         }));
 
         return sendResponse({
