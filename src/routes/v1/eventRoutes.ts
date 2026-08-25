@@ -297,9 +297,6 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               id: true,
             },
           });
-          console.log(teamType);
-          console.log(event.teamTypeCode);
-          console.log(event.name);
 
           const paymentMode =
             event.paymentModeCode !== null
@@ -787,11 +784,19 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
       "/results/:eventId",
       async ({ db, params: { eventId } }) => {
         try {
-          const [event] = await db
-            .select()
+          const [eventRow] = await db
+            .select({
+              event: eventTable,
+              tournamentName: tournamentTable.name,
+            })
             .from(eventTable)
+            .innerJoin(
+              tournamentTable,
+              eq(eventTable.tournamentId, tournamentTable.id),
+            )
             .where(eq(eventTable.id, eventId))
             .limit(1);
+          const event = eventRow?.event;
 
           if (!event) {
             return sendResponse({
@@ -800,37 +805,53 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
-          const teamRows = await db
-            .select()
-            .from(teamTable)
-            .where(eq(teamTable.eventId, eventId));
-          const matchRows = await db
-            .select()
-            .from(matchTable)
-            .where(eq(matchTable.eventId, eventId));
-          const matchIds = matchRows.map((match) => match.id).filter(Boolean) as string[];
-          const teamIds = teamRows.map((team) => team.id).filter(Boolean) as string[];
-
-          const [participantRows, setRows] = await Promise.all([
-            teamIds.length
-              ? db
-                  .select({
-                    teamId: teamParticipantTable.teamId,
-                    user: profileTable,
-                  })
-                  .from(teamParticipantTable)
-                  .innerJoin(
-                    profileTable,
-                    eq(teamParticipantTable.userId, profileTable.id),
-                  )
-                  .where(inArray(teamParticipantTable.teamId, teamIds))
-              : Promise.resolve([]),
-            matchIds.length
-              ? db
-                  .select()
-                  .from(setTable)
-                  .where(inArray(setTable.matchId, matchIds))
-              : Promise.resolve([]),
+          const [teamRows, matchRows, participantRows, setRows] =
+            await Promise.all([
+              db.select().from(teamTable).where(eq(teamTable.eventId, eventId)),
+              db
+                .select({
+                  id: matchTable.id,
+                  eventId: matchTable.eventId,
+                  roundNumber: matchTable.roundNumber,
+                  teamA: matchTable.teamA,
+                  teamB: matchTable.teamB,
+                  winnerId: matchTable.winnerId,
+                  matchState: matchTable.matchState,
+                })
+                .from(matchTable)
+                .where(eq(matchTable.eventId, eventId)),
+              db
+                .select({
+                  teamId: teamParticipantTable.teamId,
+                  user: {
+                    id: profileTable.id,
+                    name: profileTable.name,
+                    profilePicUrl: profileTable.profilePicUrl,
+                  },
+                })
+                .from(teamParticipantTable)
+                .innerJoin(
+                  teamTable,
+                  eq(teamParticipantTable.teamId, teamTable.id),
+                )
+                .innerJoin(
+                  profileTable,
+                  eq(teamParticipantTable.userId, profileTable.id),
+                )
+                .where(eq(teamTable.eventId, eventId)),
+              db
+                .select({
+                  id: setTable.id,
+                  matchId: setTable.matchId,
+                  setStatus: setTable.setStatus,
+                  setNumber: setTable.setNumber,
+                  teamAScore: setTable.teamAScore,
+                  teamBScore: setTable.teamBScore,
+                  winnerId: setTable.winnerId,
+                })
+                .from(setTable)
+                .innerJoin(matchTable, eq(setTable.matchId, matchTable.id))
+                .where(eq(matchTable.eventId, eventId)),
           ]);
 
           const participantsByTeamId = new Map<string, any[]>();
@@ -1003,15 +1024,16 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
                 name: event.name,
                 eventState: event.eventState,
                 tournamentId: event.tournamentId,
+                tournamentName: eventRow?.tournamentName || "",
               },
+              tournamentName: eventRow?.tournamentName || "",
               champion,
               standings,
               totalTeams: standings.length,
               totalMatches: matchRows.length,
             },
           });
-        } catch (error) {
-          console.error("[event/results] failed", error);
+        } catch {
           return sendResponse({
             success: false,
             message: "Failed to fetch event results",
@@ -1083,8 +1105,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             success: true,
             message: "Participants finalized successfully",
           });
-        } catch (error) {
-          console.error("[event/finalize-participants] failed", error);
+        } catch {
           return sendResponse({
             success: false,
             message: "Failed to finalize participants",
@@ -1155,8 +1176,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             success: true,
             message: "Schedule finalized and matches created successfully",
           });
-        } catch (error) {
-          console.error("[event/finalize-schedule] failed", error);
+        } catch {
           return sendResponse({
             success: false,
             message: "Failed to finalize schedule",
@@ -1231,8 +1251,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             success: true,
             message: "Event completed successfully",
           });
-        } catch (error) {
-          console.error("[event/complete] failed", error);
+        } catch {
           return sendResponse({
             success: false,
             message: "Failed to complete event",

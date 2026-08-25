@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   pgTable,
   text,
@@ -12,43 +13,55 @@ import { profileTable } from "./user";
 import { matchStateEnum, setStateEnum, sideSwitchEnum } from "./enums";
 import { createdAt, updatedAt } from "./common";
 
-export const matchTable = pgTable.withRLS("match_table", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  eventId: uuid("event_id")
-    .notNull()
-    .references(() => eventTable.id),
-  roundNumber: integer("round_number").notNull(),
+export const matchTable = pgTable.withRLS(
+  "match_table",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => eventTable.id),
+    roundNumber: integer("round_number").notNull(),
 
-  teamA: uuid("team_a")
-    .notNull()
-    .references(() => teamTable.id),
-  teamB: uuid("team_b")
-    .notNull()
-    .references(() => teamTable.id),
+    teamA: uuid("team_a")
+      .notNull()
+      .references(() => teamTable.id),
+    teamB: uuid("team_b")
+      .notNull()
+      .references(() => teamTable.id),
 
-  scorer: uuid("scorer").references(() => profileTable.id),
+    scorer: uuid("scorer").references(() => profileTable.id),
 
-  courtName: text("court_name"),
+    courtName: text("court_name"),
 
-  winnerId: uuid("winner_id").references(() => teamTable.id),
+    winnerId: uuid("winner_id").references(() => teamTable.id),
 
-  matchState: matchStateEnum("match_state").notNull().default("scheduled"),
+    matchState: matchStateEnum("match_state").notNull().default("scheduled"),
 
-  setsPerMatchId: integer("sets_per_match").notNull(),
+    setsPerMatchId: integer("sets_per_match").notNull(),
 
-  pointsPerSet: integer("points_per_set").notNull(),
+    pointsPerSet: integer("points_per_set").notNull(),
 
-  deuce_enabled: boolean("deuce_enabled").notNull().default(true),
+    deuce_enabled: boolean("deuce_enabled").notNull().default(true),
 
-  deuce_limit: boolean("deuce_limit").notNull().default(false),
+    deuce_limit: boolean("deuce_limit").notNull().default(false),
 
-  sideSwitching: sideSwitchEnum("side_switching").notNull(),
+    sideSwitching: sideSwitchEnum("side_switching").notNull(),
 
-  startTime: timestamp("start_time", { mode: "date" }),
+    startTime: timestamp("start_time", { mode: "date" }),
 
-  createdAt,
-  updatedAt,
-});
+    createdAt,
+    updatedAt,
+  },
+  (table) => [
+    index("match_table_event_id_idx").on(table.eventId),
+    index("match_table_state_idx").on(table.matchState),
+    index("match_table_scorer_idx").on(table.scorer),
+    index("match_table_team_a_idx").on(table.teamA),
+    index("match_table_team_b_idx").on(table.teamB),
+    index("match_table_event_round_idx").on(table.eventId, table.roundNumber),
+    index("match_table_event_state_idx").on(table.eventId, table.matchState),
+  ],
+);
 
 export const setTable = pgTable.withRLS(
   "set_table",

@@ -4,6 +4,7 @@ import {
   invitesTable,
   inviteTypeTable,
   organizationInvitesTable,
+  organizationMemberTable,
   organizationTable,
   eventInvitesTable,
   eventTable,
@@ -14,6 +15,7 @@ import {
   teamParticipantTable,
   teamTypesTable,
   setTable,
+  orgTypesTable,
 } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
@@ -81,6 +83,276 @@ function normalizeSetRows(sets: any[] = []) {
   );
 }
 
+function hasLiveSetActivityCondition() {
+  return sql`exists (
+    select 1
+    from ${setTable}
+    where ${setTable.matchId} = ${matchTable.id}
+      and (
+        ${setTable.setStatus} in ('in_progress', 'completed')
+        or ${setTable.teamAScore} > 0
+        or ${setTable.teamBScore} > 0
+      )
+  )`;
+}
+
+async function getUserTeamIds(db: any, userId: string) {
+  const userTeams = await db
+    .select({ teamId: teamParticipantTable.teamId })
+    .from(teamParticipantTable)
+    .where(eq(teamParticipantTable.userId, userId));
+
+  return userTeams.map((team: any) => team.teamId);
+}
+
+function formatLiveMatchForUser(match: any, userId: string) {
+  const sets = normalizeSetRows(match.sets || []);
+  const currentSet =
+    sets.find((set: any) => set.setStatus === "in_progress") ||
+    [...sets]
+      .filter(
+        (set: any) =>
+          set.setStatus !== "not_started" ||
+          set.teamAScore > 0 ||
+          set.teamBScore > 0,
+      )
+      .sort((a: any, b: any) => b.setNumber - a.setNumber)[0] ||
+    sets[0];
+
+  const setsWon = sets.reduce(
+    (score: { teamA: number; teamB: number }, set: any) => {
+      if (set.setStatus !== "completed") return score;
+      if (set.winnerId === match.teamA) score.teamA += 1;
+      else if (set.winnerId === match.teamB) score.teamB += 1;
+      else if (set.teamAScore > set.teamBScore) score.teamA += 1;
+      else if (set.teamBScore > set.teamAScore) score.teamB += 1;
+      return score;
+    },
+    { teamA: 0, teamB: 0 },
+  );
+
+  const teamAPlayers = (match.teamAData?.participants || []).map((p: any) =>
+    p.user.id === userId ? "You" : p.user.name,
+  );
+  const teamBPlayers = (match.teamBData?.participants || []).map((p: any) =>
+    p.user.id === userId ? "You" : p.user.name,
+  );
+
+  return {
+    id: match.id,
+    tournamentId: match.event!.tournament.id,
+    tournamentName: match.event!.tournament.name,
+    matchTitle: `${match.event!.name} · Match #${String(match.id).split("-")[0]}`,
+    type: match.event?.teamType?.label || match.teamAData?.teamType?.label || "Match",
+    leagueTitle: match.event!.tournament.name,
+    teamA: {
+      players: teamAPlayers,
+      images: (match.teamAData?.participants || [])
+        .map((p: any) => p.user.profilePicUrl)
+        .filter(Boolean),
+    },
+    teamB: {
+      players: teamBPlayers,
+      images: (match.teamBData?.participants || [])
+        .map((p: any) => p.user.profilePicUrl)
+        .filter(Boolean),
+    },
+    leftTeamName: teamAPlayers.join(" & "),
+    rightTeamName: teamBPlayers.join(" & "),
+    leftTeamPlayers: teamAPlayers,
+    rightTeamPlayers: teamBPlayers,
+    score: {
+      teamA: setsWon.teamA,
+      teamB: setsWon.teamB,
+      currentSet: currentSet ? currentSet.setNumber : 1,
+    },
+    scoreLabel: currentSet ? `Set ${currentSet.setNumber}` : "Warm up",
+    matchScore: `${setsWon.teamA} - ${setsWon.teamB}`,
+    sets: sets.map((set: any) => ({
+      id: set.id,
+      setNumber: set.setNumber,
+      teamAScore: set.teamAScore,
+      teamBScore: set.teamBScore,
+      setStatus: set.setStatus,
+      winnerId: set.winnerId,
+    })),
+    court: match.courtName || null,
+    isLive: true,
+  };
+}
+
+async function getCurrentUserLiveMatch(db: any, user: any) {
+  const teamIds = await getUserTeamIds(db, user.id);
+  const participationConditions: any[] = [eq(matchTable.scorer, user.id)];
+
+  if (teamIds.length > 0) {
+    participationConditions.push(
+      inArray(matchTable.teamA, teamIds),
+      inArray(matchTable.teamB, teamIds),
+    );
+  }
+
+  const [liveCandidate] = await db
+    .select({ id: matchTable.id })
+    .from(matchTable)
+    .where(
+      and(
+        notInArray(matchTable.matchState, [
+          "completed",
+          "abandoned",
+          "walkover",
+        ]),
+        or(...participationConditions),
+        or(eq(matchTable.matchState, "in_progress"), hasLiveSetActivityCondition()),
+      ),
+    )
+    .orderBy(desc(matchTable.updatedAt))
+    .limit(1);
+
+  if (!liveCandidate?.id) return null;
+
+  const match = await db.query.matchTable.findFirst({
+    where: { id: liveCandidate.id },
+    with: {
+      event: {
+        with: {
+          tournament: true,
+          teamType: true,
+        },
+      },
+      teamAData: {
+        with: {
+          participants: {
+            with: {
+              user: true,
+            },
+          },
+          teamType: true,
+        },
+      },
+      teamBData: {
+        with: {
+          participants: {
+            with: {
+              user: true,
+            },
+          },
+        },
+      },
+      sets: true,
+    },
+  });
+
+  return match ? formatLiveMatchForUser(match, user.id) : null;
+}
+
+async function getUserLiveFeed(db: any, user: any) {
+  const joinedTournamentRows = await db
+    .select({ tournamentId: eventTable.tournamentId })
+    .from(teamParticipantTable)
+    .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+    .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+    .where(eq(teamParticipantTable.userId, user.id));
+
+  const joinedTournamentIds = [
+    ...new Set(joinedTournamentRows.map((row: any) => row.tournamentId)),
+  ];
+
+  const scorerTournamentRows = await db
+    .select({ tournamentId: eventTable.tournamentId })
+    .from(matchTable)
+    .innerJoin(eventTable, eq(matchTable.eventId, eventTable.id))
+    .where(eq(matchTable.scorer, user.id));
+
+  const liveFeedTournamentIds = [
+    ...new Set([
+      ...joinedTournamentIds,
+      ...scorerTournamentRows.map((row: any) => row.tournamentId),
+    ]),
+  ];
+
+  if (liveFeedTournamentIds.length === 0) return [];
+
+  const joinedTournamentEvents = await db
+    .select({ eventId: eventTable.id })
+    .from(eventTable)
+    .where(inArray(eventTable.tournamentId, liveFeedTournamentIds));
+
+  const joinedTournamentEventIds = joinedTournamentEvents.map(
+    (row: any) => row.eventId,
+  );
+
+  if (joinedTournamentEventIds.length === 0) return [];
+
+  const liveCandidateRows = await db
+    .select({ id: matchTable.id })
+    .from(matchTable)
+    .where(
+      and(
+        notInArray(matchTable.matchState, [
+          "completed",
+          "abandoned",
+          "walkover",
+        ]),
+        inArray(matchTable.eventId, joinedTournamentEventIds),
+        or(eq(matchTable.matchState, "in_progress"), hasLiveSetActivityCondition()),
+      ),
+    )
+    .orderBy(desc(matchTable.updatedAt));
+
+  const liveCandidateIds = liveCandidateRows.map((row: any) => row.id);
+  if (liveCandidateIds.length === 0) return [];
+
+  const liveMatches = await db.query.matchTable.findMany({
+    where: ((match: any, { inArray }: any) =>
+      inArray(match.id, liveCandidateIds)) as any,
+    with: {
+      event: {
+        with: {
+          tournament: true,
+        },
+      },
+      teamAData: {
+        with: {
+          participants: {
+            with: {
+              user: true,
+            },
+          },
+        },
+      },
+      teamBData: {
+        with: {
+          participants: {
+            with: {
+              user: true,
+            },
+          },
+        },
+      },
+      sets: true,
+    },
+    orderBy: (table: any, { desc }: any) => [desc(table.updatedAt)],
+  });
+
+  const groupedData: Record<string, any> = {};
+
+  (liveMatches as any[]).forEach((match: any) => {
+    const tournamentId = match.event.tournament.id;
+    if (!groupedData[tournamentId]) {
+      groupedData[tournamentId] = {
+        tournamentId,
+        tournamentName: match.event.tournament.name,
+        matches: [],
+      };
+    }
+
+    groupedData[tournamentId].matches.push(formatLiveMatchForUser(match, user.id));
+  });
+
+  return Object.values(groupedData);
+}
+
 export const userRoutes = protectedApi.group("/user", (app) =>
   app
     .get("/profile", async ({ user, db }) => {
@@ -92,6 +364,109 @@ export const userRoutes = protectedApi.group("/user", (app) =>
         success: true,
         message: "User found",
         data: userProfile,
+      });
+    })
+    .get("/bootstrap", async ({ user, db }) => {
+      const loadOrganizationRows = () =>
+        db
+          .select({
+            id: organizationTable.id,
+            name: organizationTable.name,
+            description: organizationTable.description,
+            logoUrl: organizationTable.logoUrl,
+            logoPath: organizationTable.logoPath,
+            establishedYear: organizationTable.establishedYear,
+            website: organizationTable.website,
+            contactEmail: organizationTable.contactEmail,
+            contactPhone: organizationTable.contactPhone,
+            postalCode: organizationTable.postalCode,
+            state: organizationTable.state,
+            city: organizationTable.city,
+            address: organizationTable.address,
+            verified: organizationTable.verified,
+            orgTypeId: orgTypesTable.id,
+            orgTypeCode: orgTypesTable.code,
+            orgTypeLabel: orgTypesTable.label,
+          })
+          .from(organizationMemberTable)
+          .innerJoin(
+            organizationTable,
+            eq(organizationMemberTable.organizationId, organizationTable.id),
+          )
+          .innerJoin(
+            orgTypesTable,
+            eq(organizationTable.orgTypeId, orgTypesTable.id),
+          )
+          .where(eq(organizationMemberTable.userId, user.id));
+
+      const userProfilePromise = db.query.profileTable.findFirst({
+        where: { id: user.id },
+      });
+      const organizationRowsPromise = loadOrganizationRows();
+
+      const acceptedInviteOrgs = await db
+        .select({ organizationId: organizationInvitesTable.organizationId })
+        .from(organizationInvitesTable)
+        .innerJoin(
+          invitesTable,
+          eq(organizationInvitesTable.inviteId, invitesTable.id),
+        )
+        .where(
+          and(
+            eq(invitesTable.receiverId, user.id),
+            eq(invitesTable.inviteState, "accepted"),
+          ),
+        );
+
+      if (acceptedInviteOrgs.length > 0) {
+        await db
+          .insert(organizationMemberTable)
+          .values(
+            acceptedInviteOrgs.map((row) => ({
+              organizationId: row.organizationId,
+              userId: user.id,
+              isOwner: false,
+            })),
+          )
+          .onConflictDoNothing();
+      }
+
+      const [userProfile, organizationRows] = await Promise.all([
+        userProfilePromise,
+        acceptedInviteOrgs.length > 0
+          ? loadOrganizationRows()
+          : organizationRowsPromise,
+      ]);
+
+      const organizations = organizationRows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        logoUrl: row.logoUrl,
+        logoPath: row.logoPath,
+        establishedYear: row.establishedYear,
+        website: row.website,
+        contactEmail: row.contactEmail,
+        contactPhone: row.contactPhone,
+        postalCode: row.postalCode,
+        state: row.state,
+        city: row.city,
+        address: row.address,
+        verified: row.verified,
+        orgType: {
+          id: row.orgTypeId,
+          code: row.orgTypeCode,
+          label: row.orgTypeLabel,
+        },
+      }));
+
+      return sendResponse({
+        success: true,
+        message: "User bootstrap retrieved successfully",
+        data: {
+          profile: userProfile ?? null,
+          organizations,
+        },
       });
     })
     .get("/stats", async ({ user, db }) => {
@@ -154,8 +529,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             matchesLost,
           },
         });
-      } catch (error) {
-        console.error("[user/stats] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch user statistics",
@@ -164,6 +538,16 @@ export const userRoutes = protectedApi.group("/user", (app) =>
     })
     .get("/matches/live", async ({ user, db }) => {
       try {
+        const liveData = await getCurrentUserLiveMatch(db, user);
+
+        return sendResponse({
+          success: true,
+          message: liveData
+            ? "Live match fetched successfully"
+            : "No live match found",
+          data: liveData,
+        });
+
         // 1. Get all team IDs the user is part of
         const userTeams = await db
           .select({ teamId: teamParticipantTable.teamId })
@@ -306,11 +690,29 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           message: "Live match fetched successfully",
           data,
         });
-      } catch (error) {
-        console.error("[user/matches/live] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch live match",
+        });
+      }
+    })
+    .get("/matches/live-summary", async ({ user, db }) => {
+      try {
+        const [match, feed] = await Promise.all([
+          getCurrentUserLiveMatch(db, user),
+          getUserLiveFeed(db, user),
+        ]);
+
+        return sendResponse({
+          success: true,
+          message: "Live summary fetched successfully",
+          data: { match, feed },
+        });
+      } catch {
+        return sendResponse({
+          success: false,
+          message: "Failed to fetch live summary",
         });
       }
     })
@@ -406,8 +808,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           message: "Upcoming matches fetched successfully",
           data: formattedMatches,
         });
-      } catch (error) {
-        console.error("[user/matches/upcoming] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch upcoming matches",
@@ -539,8 +940,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           message: "Past matches fetched successfully",
           data,
         });
-      } catch (error) {
-        console.error("[user/matches/past] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch past matches",
@@ -549,6 +949,16 @@ export const userRoutes = protectedApi.group("/user", (app) =>
     })
     .get("/matches/live-feed", async ({ user, db }) => {
       try {
+        const feedData = await getUserLiveFeed(db, user);
+
+        return sendResponse({
+          success: true,
+          message: feedData.length > 0
+            ? "Live feed fetched successfully"
+            : "No live matches found",
+          data: feedData,
+        });
+
         // 1. Get tournaments the user has joined through any event team.
         const joinedTournamentRows = await db
           .select({ tournamentId: eventTable.tournamentId })
@@ -759,8 +1169,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           message: "Live feed fetched successfully",
           data: Object.values(groupedData),
         });
-      } catch (error) {
-        console.error("[user/matches/live-feed] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch live feed",
@@ -836,8 +1245,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           message: "Notifications fetched successfully",
           data,
         });
-      } catch (error) {
-        console.error("[user/notifications] failed", error);
+      } catch {
         return sendResponse({
           success: false,
           message: "Failed to fetch notifications",
@@ -929,15 +1337,6 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           });
         }
 
-        console.info("[user/register] requested", {
-          userId: user.id,
-          phone: body.phone,
-          gender: body.gender,
-          dob,
-          hasPlayingHand: Boolean(body.playingHand),
-          hasPrimarySport: Boolean(body.primarySport),
-        });
-
         try {
           const dobValue = sql`${dob}::date`;
           const existingProfile = await db.query.profileTable.findFirst({
@@ -958,10 +1357,6 @@ export const userRoutes = protectedApi.group("/user", (app) =>
               })
               .where(eq(profileTable.id, user.id));
 
-            console.info("[user/register] updated existing profile", {
-              userId: user.id,
-            });
-
             return sendResponse({
               message: "Profile already existed and was updated",
               success: true,
@@ -978,22 +1373,12 @@ export const userRoutes = protectedApi.group("/user", (app) =>
             primarySport: body.primarySport,
           });
 
-          console.info("[user/register] created profile", {
-            userId: user.id,
-          });
-
           return sendResponse({
             message: "Created Profile",
             success: true,
           });
         } catch (error) {
           const details = getDbErrorDetails(error);
-          console.error("[user/register] failed", {
-            userId: user.id,
-            phone: body.phone,
-            dob,
-            details,
-          });
 
           if (details.code === "23505") {
             return sendResponse({

@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   pgTable,
   primaryKey,
@@ -53,5 +54,8 @@ export const organizationMemberTable = pgTable.withRLS(
     createdAt,
     updatedAt,
   },
-  (table) => [primaryKey({ columns: [table.organizationId, table.userId] })],
+  (table) => [
+    primaryKey({ columns: [table.organizationId, table.userId] }),
+    index("organization_member_table_user_id_idx").on(table.userId),
+  ],
 );

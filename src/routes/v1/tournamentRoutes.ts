@@ -12,7 +12,12 @@ import {
   tournamentTable,
   tournamentVolunteerTable,
   organizationMemberTable,
+  organizationTable,
+  eventFormatsTable,
+  paymentModesTable,
   profileTable,
+  sportsOptionsTable,
+  teamTypesTable,
 } from "@/services/db/schema";
 import { inArray, eq, notInArray, or, and } from "drizzle-orm";
 import { getDate } from "@/utils/helpers";
@@ -50,6 +55,186 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         return sendResponse({
           success: true,
           message: "Tournament retrieved successfully",
+          data: sanitizedTournament,
+        });
+      },
+      {
+        params: t.Object({ tournamentId: t.String({ format: "uuid" }) }),
+      },
+    )
+    .get(
+      "/registration-info/:tournamentId",
+      async ({ db, user, params: { tournamentId } }) => {
+        const [tournamentRows, eventRows, teamRows, userTeamRows] =
+          await Promise.all([
+            db
+              .select({
+                tournament: tournamentTable,
+                organization: {
+                  id: organizationTable.id,
+                  name: organizationTable.name,
+                  description: organizationTable.description,
+                  logoUrl: organizationTable.logoUrl,
+                  logoPath: organizationTable.logoPath,
+                  establishedYear: organizationTable.establishedYear,
+                  website: organizationTable.website,
+                  contactEmail: organizationTable.contactEmail,
+                  contactPhone: organizationTable.contactPhone,
+                  postalCode: organizationTable.postalCode,
+                  state: organizationTable.state,
+                  city: organizationTable.city,
+                  address: organizationTable.address,
+                  verified: organizationTable.verified,
+                },
+              })
+              .from(tournamentTable)
+              .innerJoin(
+                organizationTable,
+                eq(tournamentTable.organizationId, organizationTable.id),
+              )
+              .where(eq(tournamentTable.id, tournamentId))
+              .limit(1),
+            db
+              .select({
+                event: eventTable,
+                sportsOption: sportsOptionsTable,
+                eventFormat: eventFormatsTable,
+                paymentMode: paymentModesTable,
+                teamType: teamTypesTable,
+              })
+              .from(eventTable)
+              .leftJoin(
+                sportsOptionsTable,
+                eq(eventTable.sportId, sportsOptionsTable.id),
+              )
+              .leftJoin(
+                eventFormatsTable,
+                eq(eventTable.formatId, eventFormatsTable.id),
+              )
+              .leftJoin(
+                paymentModesTable,
+                eq(eventTable.paymentModeId, paymentModesTable.id),
+              )
+              .leftJoin(
+                teamTypesTable,
+                eq(eventTable.teamTypeId, teamTypesTable.id),
+              )
+              .where(eq(eventTable.tournamentId, tournamentId)),
+            db
+              .select({
+                team: teamTable,
+                teamType: teamTypesTable,
+              })
+              .from(teamTable)
+              .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+              .leftJoin(
+                teamTypesTable,
+                eq(teamTable.teamTypeId, teamTypesTable.id),
+              )
+              .where(eq(eventTable.tournamentId, tournamentId)),
+            db
+              .select({ teamId: teamParticipantTable.teamId })
+              .from(teamParticipantTable)
+              .innerJoin(
+                teamTable,
+                eq(teamParticipantTable.teamId, teamTable.id),
+              )
+              .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+              .where(
+                and(
+                  eq(eventTable.tournamentId, tournamentId),
+                  eq(teamParticipantTable.userId, user.id),
+                ),
+              ),
+          ]);
+
+        const tournamentRow = tournamentRows[0];
+        if (!tournamentRow) {
+          return sendResponse({
+            success: true,
+            message: "Tournament registration info retrieved successfully",
+            data: null,
+          });
+        }
+
+        const userTeamIds = (userTeamRows as any[]).map((row) => row.teamId);
+        const userTeamIdSet = new Set(userTeamIds);
+        const participantRows =
+          userTeamIds.length > 0
+            ? await db
+                .select({
+                  teamId: teamParticipantTable.teamId,
+                  userId: teamParticipantTable.userId,
+                  user: {
+                    id: profileTable.id,
+                    name: profileTable.name,
+                    profilePicUrl: profileTable.profilePicUrl,
+                    profilePicPath: profileTable.profilePicPath,
+                  },
+                })
+                .from(teamParticipantTable)
+                .innerJoin(
+                  profileTable,
+                  eq(teamParticipantTable.userId, profileTable.id),
+                )
+                .where(inArray(teamParticipantTable.teamId, userTeamIds))
+            : [];
+
+        const participantsByTeamId = new Map<string, any[]>();
+        for (const row of participantRows as any[]) {
+          const current = participantsByTeamId.get(row.teamId) || [];
+          current.push({
+            id: row.userId,
+            userId: row.userId,
+            teamId: row.teamId,
+            user: row.user,
+          });
+          participantsByTeamId.set(row.teamId, current);
+        }
+
+        const teamCountsByEventId = new Map<string, number>();
+        const teamsByEventId = new Map<string, any[]>();
+        for (const row of teamRows as any[]) {
+          teamCountsByEventId.set(
+            row.team.eventId,
+            (teamCountsByEventId.get(row.team.eventId) || 0) + 1,
+          );
+          if (!userTeamIdSet.has(row.team.id)) continue;
+
+          const team = {
+            ...row.team,
+            teamType: row.teamType,
+            teamTypeCode: row.teamType?.code ?? null,
+            participants: participantsByTeamId.get(row.team.id) || [],
+          };
+          const current = teamsByEventId.get(row.team.eventId) || [];
+          current.push(team);
+          teamsByEventId.set(row.team.eventId, current);
+        }
+
+        const events = (eventRows as any[]).map((row) => ({
+          ...row.event,
+          sportsOption: row.sportsOption,
+          sportsOptionCode: row.sportsOption?.code ?? null,
+          eventFormat: row.eventFormat,
+          eventFormatCode: row.eventFormat?.code ?? null,
+          paymentMode: row.paymentMode,
+          paymentModeCode: row.paymentMode?.code ?? null,
+          teamType: row.teamType,
+          teamTypeCode: row.teamType?.code ?? null,
+          teamCount: teamCountsByEventId.get(row.event.id) || 0,
+          teams: teamsByEventId.get(row.event.id) || [],
+        }));
+
+        const sanitizedTournament = sanitizeTournamentTree({
+          ...tournamentRow.tournament,
+          organization: tournamentRow.organization,
+          events,
+        });
+
+        return sendResponse({
+          success: true,
+          message: "Tournament registration info retrieved successfully",
           data: sanitizedTournament,
         });
       },
@@ -177,21 +362,13 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
       "/summary/:tournamentId",
       async ({ db, user, params: { tournamentId } }) => {
         try {
+          console.info("[TournamentSummary] request", {
+            tournamentId,
+          });
+
           const tournament = await db.query.tournamentTable.findFirst({
             where: ((table: any, { eq }: any) =>
               eq(table.id, tournamentId)) as any,
-            with: {
-              events: {
-                with: {
-                  teams: {
-                    with: {
-                      participants: true,
-                    },
-                  },
-                  matches: true,
-                },
-              },
-            },
           });
 
           if (!tournament) {
@@ -201,39 +378,189 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             });
           }
 
-          const member = await db.query.organizationMemberTable.findFirst({
-            where: ((table: any, { eq, and }: any) =>
-              and(
-                eq(table.organizationId, tournament.organizationId),
-                eq(table.userId, user.id),
-              )) as any,
-          });
+          const [member, volunteer] = await Promise.all([
+            db.query.organizationMemberTable.findFirst({
+              where: ((table: any, { eq, and }: any) =>
+                and(
+                  eq(table.organizationId, tournament.organizationId),
+                  eq(table.userId, user.id),
+                )) as any,
+            }),
+            db.query.tournamentVolunteerTable.findFirst({
+              where: ((table: any, { eq, and }: any) =>
+                and(
+                  eq(table.tournamentId, tournamentId),
+                  eq(table.userId, user.id),
+                )) as any,
+            }),
+          ]);
 
-          if (!member) {
+          if (!member && !volunteer) {
+            console.warn("[TournamentSummary] unauthorized", {
+              tournamentId,
+              hasOrgMember: Boolean(member),
+              hasTournamentVolunteer: Boolean(volunteer),
+            });
             return sendResponse({
               success: false,
               message: "You are not eligible to view this tournament summary",
             });
           }
 
-          const eventSummaries = (sanitizeTournamentTree(tournament).events ?? []).map(
-            (event: any) => {
-              const teams = event.teams ?? [];
-              const matches = event.matches ?? [];
+          const events = await db
+            .select()
+            .from(eventTable)
+            .where(eq(eventTable.tournamentId, tournamentId));
 
-              const enrolledParticipants = teams.reduce(
-                (sum: number, team: any) =>
-                  sum + (team.participants?.length ?? 0),
-                0,
-              );
+          const eventIds = events.map((event: any) => event.id);
+          const teamTypeIds = [
+            ...new Set(
+              events.map((event: any) => event.teamTypeId).filter(Boolean),
+            ),
+          ];
+
+          console.info("[TournamentSummary] events-loaded", {
+            tournamentId,
+            eventCount: events.length,
+            eventIds,
+          });
+
+          const [teams, participantRows, matches, teamTypes] =
+            eventIds.length > 0
+              ? await Promise.all([
+                  db
+                    .select()
+                    .from(teamTable)
+                    .where(inArray(teamTable.eventId, eventIds)),
+                  db
+                    .select({
+                      teamId: teamParticipantTable.teamId,
+                      eventId: teamTable.eventId,
+                      teamStatus: teamTable.teamStatus,
+                    })
+                    .from(teamParticipantTable)
+                    .innerJoin(
+                      teamTable,
+                      eq(teamParticipantTable.teamId, teamTable.id),
+                    )
+                    .where(inArray(teamTable.eventId, eventIds)),
+                  db
+                    .select({
+                      id: matchTable.id,
+                      eventId: matchTable.eventId,
+                      matchState: matchTable.matchState,
+                    })
+                    .from(matchTable)
+                    .where(inArray(matchTable.eventId, eventIds)),
+                  teamTypeIds.length > 0
+                    ? db
+                        .select({
+                          id: teamTypesTable.id,
+                          code: teamTypesTable.code,
+                          label: teamTypesTable.label,
+                        })
+                        .from(teamTypesTable)
+                        .where(inArray(teamTypesTable.id, teamTypeIds))
+                    : Promise.resolve([]),
+                ])
+              : [[], [], [], []];
+
+          const teamTypeById = new Map<number, any>(
+            (teamTypes as any[]).map((teamType: any) => [
+              teamType.id,
+              teamType,
+            ]),
+          );
+
+          const teamsByEventId = new Map<string, any[]>();
+          for (const team of teams as any[]) {
+            const current = teamsByEventId.get(team.eventId) || [];
+            current.push(team);
+            teamsByEventId.set(team.eventId, current);
+          }
+
+          const matchesByEventId = new Map<string, any[]>();
+          for (const match of matches as any[]) {
+            const current = matchesByEventId.get(match.eventId) || [];
+            current.push(match);
+            matchesByEventId.set(match.eventId, current);
+          }
+
+          const participantsByEventId = new Map<string, any[]>();
+          for (const participant of participantRows as any[]) {
+            if (!participant.eventId) continue;
+            const current = participantsByEventId.get(participant.eventId) || [];
+            current.push(participant);
+            participantsByEventId.set(participant.eventId, current);
+          }
+
+          const matchStateCounts = (items: any[]) =>
+            items.reduce((counts: Record<string, number>, match: any) => {
+              const state = match.matchState || "unknown";
+              counts[state] = (counts[state] || 0) + 1;
+              return counts;
+            }, {});
+
+          console.info(
+            "[TournamentSummary] raw-counts",
+            JSON.stringify(
+              {
+                tournamentId,
+                teamCount: (teams as any[]).length,
+                matchCount: (matches as any[]).length,
+                matchStates: matchStateCounts(matches as any[]),
+                events: events.map((event: any) => ({
+                  eventId: event.id,
+                  eventState: event.eventState,
+                  teamTypeCode: teamTypeById.get(event.teamTypeId)?.code ?? null,
+                  teamCount: (teamsByEventId.get(event.id) || []).length,
+                  participantCount: (
+                    participantsByEventId.get(event.id) || []
+                  ).length,
+                  matchCount: (matchesByEventId.get(event.id) || []).length,
+                  matchStates: matchStateCounts(
+                    matchesByEventId.get(event.id) || [],
+                  ),
+                })),
+              },
+              null,
+              2,
+            ),
+          );
+
+          const eventSummaries = events.map((event: any) => {
+              const teams = teamsByEventId.get(event.id) || [];
+              const participants = participantsByEventId.get(event.id) || [];
+              const matches = matchesByEventId.get(event.id) || [];
+              const teamType = teamTypeById.get(event.teamTypeId);
+              const teamTypeCode = teamType?.code ?? null;
+              const isSingles = teamTypeCode === "singles";
 
               const totalTeams = teams.length;
+              const enrolledParticipants = isSingles
+                ? participants.length
+                : totalTeams;
+              const countedStatuses = [
+                "registered",
+                "participating",
+                "eliminated",
+              ];
+              const confirmedTeams = teams.filter((team: any) =>
+                countedStatuses.includes(team.teamStatus),
+              ).length;
+              const confirmedParticipantCount = participants.filter(
+                (participant: any) =>
+                  countedStatuses.includes(participant.teamStatus),
+              ).length;
+              const confirmedCount = isSingles
+                ? confirmedParticipantCount
+                : confirmedTeams;
               const amount = Number(event.amount ?? 0);
-              const totalCollected = amount * totalTeams;
+              const totalCollected = amount * confirmedCount;
 
               const totalMatches = matches.length;
-              const completedMatches = matches.filter(
-                (m: any) => m.matchState === "completed",
+              const completedMatches = matches.filter((m: any) =>
+                ["completed", "abandoned", "walkover"].includes(m.matchState),
               ).length;
               const liveMatches = matches.filter(
                 (m: any) => m.matchState === "in_progress",
@@ -265,11 +592,13 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 eventId: event.id,
                 eventName: event.name,
                 eventState: event.eventState,
+                teamTypeCode,
+                teamTypeLabel: teamType?.label ?? null,
                 amount,
                 totalCollected,
                 totalTeams,
                 enrolledParticipants,
-                confirmedParticipants: enrolledParticipants,
+                confirmedParticipants: confirmedCount,
                 totalMatches,
                 completedMatches,
                 liveMatches,
@@ -279,7 +608,29 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 startDate: event.startDate,
                 stageText,
               };
-            },
+            });
+
+          console.info(
+            "[TournamentSummary] response-events",
+            JSON.stringify(
+              {
+                tournamentId,
+                events: eventSummaries.map((event: any) => ({
+                  eventId: event.eventId,
+                  eventState: event.eventState,
+                  teamTypeCode: event.teamTypeCode,
+                  totalTeams: event.totalTeams,
+                  confirmedCount: event.confirmedParticipants,
+                  totalMatches: event.totalMatches,
+                  completedMatches: event.completedMatches,
+                  liveMatches: event.liveMatches,
+                  remainingMatches: event.remainingMatches,
+                  stageText: event.stageText,
+                })),
+              },
+              null,
+              2,
+            ),
           );
 
           return sendResponse({
@@ -292,7 +643,10 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             },
           });
         } catch (error) {
-          console.error("[tournament/summary] failed", error);
+          console.error("[TournamentSummary] failed", {
+            tournamentId,
+            message: error instanceof Error ? error.message : String(error),
+          });
           return sendResponse({
             success: false,
             message: "Failed to fetch tournament summary",
@@ -480,8 +834,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             success: true,
             message: `Tournament status synced to ${newState} successfully`,
           });
-        } catch (error) {
-          console.error("[tournament/sync-status] failed", error);
+        } catch {
           return sendResponse({
             success: false,
             message: "Failed to sync tournament status",
@@ -739,6 +1092,114 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         )
         .group("/user", (userApp) =>
           userApp
+            .get("/home", async ({ db, user }) => {
+              const userProfile = await db.query.profileTable.findFirst({
+                where: { id: user.id },
+                columns: { gender: true },
+              });
+
+              if (!userProfile) {
+                return sendResponse({
+                  success: false,
+                  message: "User profile not found",
+                });
+              }
+
+              const joinedTournamentsQuery = await db
+                .select({
+                  tournamentId: eventTable.tournamentId,
+                  eventId: eventTable.id,
+                })
+                .from(teamParticipantTable)
+                .innerJoin(
+                  teamTable,
+                  eq(teamParticipantTable.teamId, teamTable.id),
+                )
+                .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+                .where(eq(teamParticipantTable.userId, user.id));
+
+              const joinedTournamentIds = [
+                ...new Set(
+                  joinedTournamentsQuery.map((row) => row.tournamentId),
+                ),
+              ];
+              const joinedTournamentIdSet = new Set(joinedTournamentIds);
+              const joinedEventIds = new Set(
+                joinedTournamentsQuery.map((row) => row.eventId),
+              );
+
+              const browseTournaments = await db.query.tournamentTable.findMany({
+                where: { tournamentState: "published" },
+                with: {
+                  events: {
+                    with: {
+                      sportsOption: true,
+                      teamType: true,
+                      eventFormat: true,
+                    },
+                  },
+                  organization: {
+                    with: {
+                      orgType: true,
+                    },
+                  },
+                },
+              });
+
+              const browse = browseTournaments.filter((t) => {
+                if (joinedTournamentIdSet.has(t.id)) return false;
+
+                return t.events.some(
+                  (event: any) =>
+                    event.gender === null || event.gender === userProfile.gender,
+                );
+              });
+
+              let joined: any[] = [];
+              if (joinedTournamentIds.length > 0) {
+                const joinedTournaments = await db.query.tournamentTable.findMany({
+                  where: ((table: any, { inArray }: any) =>
+                    inArray(table.id, joinedTournamentIds)) as any,
+                  with: {
+                    events: {
+                      with: {
+                        sportsOption: true,
+                        teamType: true,
+                        eventFormat: true,
+                      },
+                    },
+                    organization: {
+                      with: {
+                        orgType: true,
+                      },
+                    },
+                  },
+                });
+
+                joined = (joinedTournaments as any[])
+                  .filter(
+                    (t) =>
+                      t.tournamentState === "published" ||
+                      t.tournamentState === "in_progress",
+                  )
+                  .map((t) => ({
+                    ...t,
+                    events: t.events.filter((e: any) =>
+                      joinedEventIds.has(e.id),
+                    ),
+                  }))
+                  .filter((t) => t.events.length > 0);
+              }
+
+              return sendResponse({
+                success: true,
+                message: "Home tournaments retrieved successfully",
+                data: {
+                  browse,
+                  joined,
+                },
+              });
+            })
             .get("/browse", async ({ db, user }) => {
               const userProfile = await db.query.profileTable.findFirst({
                 where: { id: user.id },
@@ -929,13 +1390,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               });
             })
             .get("/managed", async ({ db, user }) => {
-              console.info("[tournamentRoutes.managed] loading", {
-                userId: user.id,
-                role: "admin",
-                source: "accepted_admin_invite_and_admin_volunteer_role",
-              });
-
-              const [acceptedAdminCrewInvites, allCrewInviteRows, allVolunteerRows] =
+              const [acceptedAdminCrewInvites, allVolunteerRows] =
                 await Promise.all([
                   db
                     .select({
@@ -958,19 +1413,6 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                     ),
                   db
                     .select({
-                      inviteId: invitesTable.id,
-                      tournamentId: tournamentInvitesTable.tournamentId,
-                      inviteState: invitesTable.inviteState,
-                      role: tournamentInvitesTable.role,
-                    })
-                    .from(tournamentInvitesTable)
-                    .innerJoin(
-                      invitesTable,
-                      eq(tournamentInvitesTable.inviteId, invitesTable.id),
-                    )
-                    .where(eq(invitesTable.receiverId, user.id)),
-                  db
-                    .select({
                       tournamentId: tournamentVolunteerTable.tournamentId,
                       role: tournamentVolunteerTable.role,
                     })
@@ -989,12 +1431,6 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   .map((row) => row.tournamentId)
                   .filter(Boolean),
               );
-              const scorerVolunteerTournamentIds = new Set(
-                allVolunteerRows
-                  .filter((row) => row.role === "scorer")
-                  .map((row) => row.tournamentId)
-                  .filter(Boolean),
-              );
 
               const managedTournamentIds = [
                 ...new Set(
@@ -1004,105 +1440,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 ),
               ];
               const managedTournamentIdSet = new Set(managedTournamentIds);
-              const inviteOnlyTournamentIds = [
-                ...acceptedAdminInviteTournamentIds,
-              ].filter(
-                (tournamentId) => !adminVolunteerTournamentIds.has(tournamentId),
-              );
-              const volunteerOnlyTournamentIds = [
-                ...adminVolunteerTournamentIds,
-              ].filter(
-                (tournamentId) =>
-                  !acceptedAdminInviteTournamentIds.has(tournamentId),
-              );
-              const scorerOnlyTournamentIds = [
-                ...scorerVolunteerTournamentIds,
-              ].filter(
-                (tournamentId) => !adminVolunteerTournamentIds.has(tournamentId),
-              );
-
-              console.info("[tournamentRoutes.managed] accepted crew invites", {
-                userId: user.id,
-                inviteCount: acceptedAdminCrewInvites.length,
-                inviteIds: acceptedAdminCrewInvites.map((row) => row.inviteId),
-                acceptedAdminInviteTournamentIds: [
-                  ...acceptedAdminInviteTournamentIds,
-                ],
-                adminVolunteerTournamentIds: [...adminVolunteerTournamentIds],
-                scorerVolunteerTournamentIds: [...scorerVolunteerTournamentIds],
-                managedTournamentIds,
-                excludedPotentialCauses: {
-                  inviteOnlyTournamentIds,
-                  volunteerOnlyTournamentIds,
-                  scorerOnlyTournamentIds,
-                },
-              });
-
-              console.info("[tournamentRoutes.managed] user role audit", {
-                userId: user.id,
-                acceptedAdminCrewInvites: acceptedAdminCrewInvites.map((row) => ({
-                  inviteId: row.inviteId,
-                  tournamentId: row.tournamentId,
-                  inviteState: row.inviteState,
-                  role: row.role,
-                  hasAdminVolunteerRole: adminVolunteerTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                  hasScorerVolunteerRole: scorerVolunteerTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                  qualifiesAsAdmin: adminVolunteerTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                })),
-                allCrewInvitesForUser: allCrewInviteRows.map((row) => ({
-                  inviteId: row.inviteId,
-                  tournamentId: row.tournamentId,
-                  inviteState: row.inviteState,
-                  role: row.role,
-                  hasAdminVolunteerRole: adminVolunteerTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                  hasScorerVolunteerRole: scorerVolunteerTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                  qualifiesAsAdmin:
-                    row.inviteState === "accepted" &&
-                    row.role === "admin" &&
-                    adminVolunteerTournamentIds.has(row.tournamentId),
-                })),
-                allVolunteerRowsForUser: allVolunteerRows.map((row) => ({
-                  tournamentId: row.tournamentId,
-                  role: row.role,
-                  hasAcceptedAdminInvite: acceptedAdminInviteTournamentIds.has(
-                    row.tournamentId,
-                  ),
-                  qualifiesAsAdmin:
-                    row.role === "admin" &&
-                    acceptedAdminInviteTournamentIds.has(row.tournamentId),
-                })),
-              });
-              console.info("[tournamentRoutes.managed] strict assignment filter", {
-                userId: user.id,
-                acceptedAdminInviteCount: acceptedAdminInviteTournamentIds.size,
-                adminVolunteerCount: adminVolunteerTournamentIds.size,
-                scorerVolunteerCount: scorerVolunteerTournamentIds.size,
-                returnedTournamentIds: managedTournamentIds,
-                excludedInviteOnlyCount: inviteOnlyTournamentIds.length,
-                excludedVolunteerOnlyCount: volunteerOnlyTournamentIds.length,
-                excludedScorerOnlyCount: scorerOnlyTournamentIds.length,
-              });
 
               if (managedTournamentIds.length === 0) {
-                console.info("[tournamentRoutes.managed] no tournaments", {
-                  userId: user.id,
-                  acceptedAdminInviteCount: acceptedAdminCrewInvites.length,
-                  crewInviteCount: allCrewInviteRows.length,
-                  volunteerRowCount: allVolunteerRows.length,
-                  adminVolunteerCount: adminVolunteerTournamentIds.size,
-                  scorerVolunteerCount: scorerVolunteerTournamentIds.size,
-                });
-
                 return sendResponse({
                   success: true,
                   message: "No managed tournaments found",
@@ -1128,42 +1467,6 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               const filteredTournaments = (tournaments as any[]).filter(
                 (tournament) => managedTournamentIdSet.has(tournament.id),
               );
-              const blockedTournamentIds = (tournaments as any[])
-                .filter((tournament) => !managedTournamentIdSet.has(tournament.id))
-                .map((tournament) => tournament.id);
-
-              if (blockedTournamentIds.length > 0) {
-                console.warn("[tournamentRoutes.managed] blocked out-of-scope rows", {
-                  userId: user.id,
-                  blockedTournamentIds,
-                  managedTournamentIds,
-                });
-              }
-
-              console.info("[tournamentRoutes.managed] returning", {
-                userId: user.id,
-                tournamentCount: filteredTournaments.length,
-                tournaments: filteredTournaments.map((tournament: any) => ({
-                  id: tournament.id,
-                  name: tournament.name,
-                  organizationId: tournament.organizationId,
-                  acceptedAdminInviteIds: acceptedAdminCrewInvites
-                    .filter((row) => row.tournamentId === tournament.id)
-                    .map((row) => row.inviteId),
-                  hasAcceptedAdminInvite: acceptedAdminCrewInvites.some(
-                    (row) => row.tournamentId === tournament.id,
-                  ),
-                  hasAdminVolunteerRole: adminVolunteerTournamentIds.has(
-                    tournament.id,
-                  ),
-                  hasScorerVolunteerRole: scorerVolunteerTournamentIds.has(
-                    tournament.id,
-                  ),
-                  volunteerRoles: allVolunteerRows
-                    .filter((row) => row.tournamentId === tournament.id)
-                    .map((row) => row.role),
-                })),
-              });
 
               return sendResponse({
                 success: true,
