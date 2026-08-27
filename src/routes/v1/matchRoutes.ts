@@ -9,7 +9,7 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { eq, and, inArray, notInArray, ne } from "drizzle-orm";
+import { eq, and, inArray, notInArray, ne, sql } from "drizzle-orm";
 import { t } from "elysia";
 
 function nullableUuid(value: unknown) {
@@ -20,8 +20,8 @@ function nullableUuid(value: unknown) {
 
 function normalizeSetRows(sets: any[] = []) {
   const statusRank: Record<string, number> = {
-    in_progress: 3,
-    completed: 2,
+    completed: 3,
+    in_progress: 2,
     not_started: 1,
   };
   const byNumber = new Map<number, any>();
@@ -55,6 +55,12 @@ function normalizeSetRows(sets: any[] = []) {
 
   return [...byNumber.values()].sort(
     (a: any, b: any) => a.setNumber - b.setNumber,
+  );
+}
+
+async function lockMatchSet(tx: any, matchId: string, setNumber: number) {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${matchId}), ${setNumber}::int)`,
   );
 }
 
@@ -322,6 +328,8 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           const matchWinnerId = nullableUuid(body.matchWinnerId);
 
           await db.transaction(async (tx: any) => {
+            await lockMatchSet(tx, body.matchId, body.setNumber);
+
             const existingSet = await tx
               .select({ id: setTable.id })
               .from(setTable)
@@ -342,7 +350,12 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   setStatus: body.setStatus,
                   winnerId: setWinnerId,
                 })
-                .where(eq(setTable.id, existingSet[0].id));
+                .where(
+                  and(
+                    eq(setTable.matchId, body.matchId),
+                    eq(setTable.setNumber, body.setNumber),
+                  ),
+                );
             } else {
               await tx.insert(setTable).values({
                 matchId: body.matchId,
@@ -1674,16 +1687,23 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             });
           }
 
-          let existingSet = await db.query.setTable.findFirst({
-            where: ((table: any, { eq, and }: any) =>
-              and(
-                eq(table.matchId, body.matchId),
-                eq(table.setNumber, body.setNumber),
-              )) as any,
-          });
+          const initializedSet = await db.transaction(async (tx: any) => {
+            await lockMatchSet(tx, body.matchId, body.setNumber);
 
-          if (!existingSet) {
-            const insertedSet = await db
+            const existingSet = await tx
+              .select({ id: setTable.id })
+              .from(setTable)
+              .where(
+                and(
+                  eq(setTable.matchId, body.matchId),
+                  eq(setTable.setNumber, body.setNumber),
+                ),
+              )
+              .limit(1);
+
+            if (existingSet[0]?.id) return existingSet[0];
+
+            const insertedSet = await tx
               .insert(setTable)
               .values({
                 matchId: body.matchId,
@@ -1694,10 +1714,10 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               })
               .returning({ id: setTable.id });
 
-            existingSet = insertedSet[0];
-          }
+            return insertedSet[0];
+          });
 
-          const setId = existingSet!.id;
+          const setId = initializedSet!.id;
 
           // Broadcast set initialization
           const tournamentId = match.event!.tournament!.id;

@@ -5,8 +5,8 @@ WITH ranked_sets AS (
       PARTITION BY match_id, set_integer
       ORDER BY
         CASE set_status
-          WHEN 'in_progress' THEN 3
-          WHEN 'completed' THEN 2
+          WHEN 'completed' THEN 3
+          WHEN 'in_progress' THEN 2
           WHEN 'not_started' THEN 1
           ELSE 0
         END DESC,
