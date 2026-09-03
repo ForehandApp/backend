@@ -2,11 +2,17 @@ import { protectedApi } from "@/routes/v1/controller";
 import {
   eventTable,
   matchTable,
+  organizationMemberTable,
   teamActionLogsTable,
   teamParticipantTable,
   teamTable,
-  tournamentTable,
 } from "@/services/db/schema";
+import {
+  canViewEvent,
+  canViewTeam,
+  isTournamentManager,
+  publicProfileColumns,
+} from "@/utils/access";
 import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, or } from "drizzle-orm";
 import { t } from "elysia";
@@ -29,6 +35,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
               eq(table.id, body.eventId)) as any,
             with: {
               teamType: true,
+              tournament: true,
             },
           });
 
@@ -47,6 +54,9 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           }
 
           const participantIds = body.participantIds;
+          const isManager = event.tournament
+            ? await isTournamentManager(db, user.id, event.tournament)
+            : false;
 
           // Singles check
           if (
@@ -67,12 +77,11 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             });
           }
 
-          // Ensure current user is one of the participants if they are creating it
-          // OR if they are an admin. For now, assume a user is creating for themselves.
-          if (!participantIds.includes(user.id)) {
-            // In some cases, a user might register a team they aren't in, but usually the creator is a participant.
-            // We'll allow it if they are an admin or if we relax this.
-            // Let's assume for now they must be one of them unless it's an org admin.
+          if (!isManager && !participantIds.includes(user.id)) {
+            return sendResponse({
+              success: false,
+              message: "You can only register a team that includes yourself",
+            });
           }
 
           // Check if any participant is already in this event
@@ -154,7 +163,10 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
       {
         body: t.Object({
           eventId: t.String({ format: "uuid" }),
-          participantIds: t.Array(t.String(), { minItems: 1, maxItems: 2 }),
+          participantIds: t.Array(t.String({ format: "uuid" }), {
+            minItems: 1,
+            maxItems: 2,
+          }),
         }),
       },
     )
@@ -181,19 +193,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             });
           }
 
-          // Check if user is a member of the organization that owns the tournament
-          const member = await db.query.organizationMemberTable.findFirst({
-            where: ((table: any, { eq, and }: any) =>
-              and(
-                eq(
-                  table.organizationId,
-                  team.event!.tournament!.organizationId,
-                ),
-                eq(table.userId, user.id),
-              )) as any,
-          });
-
-          if (!member) {
+          if (!(await isTournamentManager(db, user.id, team.event.tournament))) {
             return sendResponse({
               success: false,
               message:
@@ -256,18 +256,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             });
           }
 
-          const member = await db.query.organizationMemberTable.findFirst({
-            where: ((table: any, { eq, and }: any) =>
-              and(
-                eq(
-                  table.organizationId,
-                  team.event!.tournament!.organizationId,
-                ),
-                eq(table.userId, user.id),
-              )) as any,
-          });
-
-          if (!member) {
+          if (!(await isTournamentManager(db, user.id, team.event.tournament))) {
             return sendResponse({
               success: false,
               message:
@@ -329,6 +318,32 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           });
         }
 
+        const isManager = await isTournamentManager(
+          db,
+          user.id,
+          team.event.tournament,
+        );
+        const selfParticipantRows =
+          body.state === "registered"
+            ? await db
+                .select({ userId: teamParticipantTable.userId })
+                .from(teamParticipantTable)
+                .where(
+                  and(
+                    eq(teamParticipantTable.teamId, teamId),
+                    eq(teamParticipantTable.userId, user.id),
+                  ),
+                )
+                .limit(1)
+            : [];
+
+        if (!isManager && selfParticipantRows.length === 0) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to update this team state",
+          });
+        }
+
         if (body.state === "registered" && isRegistrationClosed(team.event)) {
           return sendResponse({
             success: false,
@@ -361,7 +376,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
     )
     .post(
       "/add-participant",
-      async ({ db, body }) => {
+      async ({ db, user, body }) => {
         try {
           const team = await db.query.teamTable.findFirst({
             where: { id: body.teamId },
@@ -369,6 +384,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
               event: {
                 with: {
                   teamType: true,
+                  tournament: true,
                 },
               },
               participants: true,
@@ -379,6 +395,16 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             return sendResponse({
               success: false,
               message: "Team or event details not found",
+            });
+          }
+
+          if (
+            !team.event.tournament ||
+            !(await isTournamentManager(db, user.id, team.event.tournament))
+          ) {
+            return sendResponse({
+              success: false,
+              message: "You are not authorized to add participants to this team",
             });
           }
 
@@ -445,7 +471,7 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
       {
         body: t.Object({
           teamId: t.String({ format: "uuid" }),
-          userId: t.String(),
+          userId: t.String({ format: "uuid" }),
         }),
       },
     )
@@ -558,19 +584,28 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
       {
         body: t.Object({
           teamId: t.String({ format: "uuid" }),
-          userId: t.String(),
+          userId: t.String({ format: "uuid" }),
         }),
       },
     )
     .get(
       "/list/:eventId",
-      async ({ db, params: { eventId } }) => {
+      async ({ db, user, params: { eventId } }) => {
+        if (!(await canViewEvent(db, user.id, eventId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view teams for this event",
+          });
+        }
+
         const teams = await db.query.teamTable.findMany({
           where: { eventId: eventId },
           with: {
             participants: {
               with: {
-                user: true,
+                user: {
+                  columns: publicProfileColumns,
+                },
               },
             },
             teamType: true,
@@ -617,7 +652,9 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           with: {
             participants: {
               with: {
-                user: true,
+                user: {
+                  columns: publicProfileColumns,
+                },
               },
             },
             teamType: true,
@@ -636,13 +673,22 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
     )
     .get(
       "/info/:teamId",
-      async ({ db, params: { teamId } }) => {
+      async ({ db, user, params: { teamId } }) => {
+        if (!(await canViewTeam(db, user.id, teamId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view this team",
+          });
+        }
+
         const team = await db.query.teamTable.findFirst({
           where: { id: teamId },
           with: {
             participants: {
               with: {
-                user: true,
+                user: {
+                  columns: publicProfileColumns,
+                },
               },
             },
             teamType: true,

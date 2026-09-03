@@ -9,6 +9,12 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
+import {
+  canViewEvent,
+  canViewMatch,
+  canViewSet,
+  publicProfileColumns,
+} from "@/utils/access";
 import { eq, and, inArray, notInArray, ne, sql } from "drizzle-orm";
 import { t } from "elysia";
 
@@ -513,7 +519,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     )
     .get(
       "/list/:eventId",
-      async ({ db, params: { eventId } }) => {
+      async ({ db, user, params: { eventId } }) => {
+        if (!(await canViewEvent(db, user.id, eventId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view matches for this event",
+          });
+        }
+
         const matches = await db.query.matchTable.findMany({
           where: ((table: any, { eq }: any) =>
             eq(table.eventId, eventId)) as any,
@@ -522,7 +535,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
@@ -531,12 +546,16 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
             },
-            scorerUser: true,
+            scorerUser: {
+              columns: publicProfileColumns,
+            },
           },
         });
         const matchIds = matches.map((match: any) => match.id);
@@ -573,7 +592,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     )
     .post(
       "/list/:eventId",
-      async ({ db, params: { eventId }, body }) => {
+      async ({ db, user, params: { eventId }, body }) => {
+        if (!(await canViewEvent(db, user.id, eventId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view matches for this event",
+          });
+        }
+
         const matches = await db.query.matchTable.findMany({
           where: ((table: any, { eq, and }: any) =>
             and(
@@ -585,7 +611,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
@@ -594,12 +622,16 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
             },
-            scorerUser: true,
+            scorerUser: {
+              columns: publicProfileColumns,
+            },
           },
         });
         const matchIds = matches.map((match: any) => match.id);
@@ -692,19 +724,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             ),
           );
 
-        const adminRows = await db
-          .select({
-            id: profileTable.id,
-            name: profileTable.name,
-            avatarUrl: profileTable.profilePicUrl,
-          })
-          .from(organizationMemberTable)
-          .innerJoin(profileTable, eq(organizationMemberTable.userId, profileTable.id))
-          .where(
-            eq(organizationMemberTable.organizationId, match.event.tournament.organizationId)
-          );
-
-        const allPotentialScorers = [...scorerRows, ...adminRows].filter(
+        const allPotentialScorers = scorerRows.filter(
           (v, i, a) => a.findIndex((t) => t.id === v.id) === i
         );
 
@@ -1132,7 +1152,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        let [candidate]: any = await db
+        const [candidate]: any = await db
           .select({
             id: profileTable.id,
             name: profileTable.name,
@@ -1150,29 +1170,10 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           .limit(1);
 
         if (!candidate) {
-          const [adminCandidate] = await db
-            .select({
-              id: profileTable.id,
-              name: profileTable.name,
-              avatarUrl: profileTable.profilePicUrl,
-            })
-            .from(organizationMemberTable)
-            .innerJoin(profileTable, eq(organizationMemberTable.userId, profileTable.id))
-            .where(
-              and(
-                eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
-                eq(organizationMemberTable.userId, body.scorerId),
-              ),
-            )
-            .limit(1);
-
-          if (!adminCandidate) {
-            return sendResponse({
-              success: false,
-              message: "Selected user is not an available scorer for this tournament",
-            });
-          }
-          candidate = adminCandidate;
+          return sendResponse({
+            success: false,
+            message: "Selected user is not an available scorer for this tournament",
+          });
         }
 
         const [conflictingMatch] = await db
@@ -1222,7 +1223,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     )
     .get(
       "/info/:matchId",
-      async ({ db, params: { matchId } }) => {
+      async ({ db, user, params: { matchId } }) => {
+        if (!(await canViewMatch(db, user.id, matchId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view this match",
+          });
+        }
+
         const match = await db.query.matchTable.findFirst({
           where: { id: matchId },
           with: {
@@ -1231,7 +1239,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
@@ -1240,7 +1250,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               with: {
                 participants: {
                   with: {
-                    user: true,
+                    user: {
+                      columns: publicProfileColumns,
+                    },
                   },
                 },
               },
@@ -1250,7 +1262,9 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                 tournament: true,
               },
             },
-            scorerUser: true,
+            scorerUser: {
+              columns: publicProfileColumns,
+            },
             winner: true,
           },
         });
@@ -1282,7 +1296,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     )
     .get(
       "/set/info/:setId",
-      async ({ db, params: { setId } }) => {
+      async ({ db, user, params: { setId } }) => {
+        if (!(await canViewSet(db, user.id, setId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view this set",
+          });
+        }
+
         const set = await db.query.setTable.findFirst({
           where: { id: setId },
           with: {
@@ -1775,20 +1796,24 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               },
               teamAData: {
                 with: {
-                  participants: {
-                    with: {
-                      user: true,
-                    },
+                participants: {
+                  with: {
+                      user: {
+                        columns: publicProfileColumns,
+                      },
                   },
+                },
                 },
               },
               teamBData: {
                 with: {
-                  participants: {
-                    with: {
-                      user: true,
-                    },
+                participants: {
+                  with: {
+                      user: {
+                        columns: publicProfileColumns,
+                      },
                   },
+                },
                 },
               },
             },

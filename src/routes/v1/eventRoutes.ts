@@ -26,13 +26,14 @@ import {
 import { profileTable } from "@/services/db/schema";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
+import { canViewEvent } from "@/utils/access";
 import { t } from "elysia";
 
 export const eventRoutes = protectedApi.group("/event", (app) =>
   app
     .get(
       "/:eventId",
-      async ({ db, params: { eventId } }) => {
+      async ({ db, user, params: { eventId } }) => {
         const [event] = await db
           .select()
           .from(eventTable)
@@ -43,6 +44,13 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           return sendResponse({
             success: false,
             message: "Event not found",
+          });
+        }
+
+        if (!(await canViewEvent(db, user.id, eventId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view this event",
           });
         }
 
@@ -107,7 +115,11 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           ? await db
               .select({
                 teamId: teamParticipantTable.teamId,
-                user: profileTable,
+                user: {
+                  id: profileTable.id,
+                  name: profileTable.name,
+                  profilePicUrl: profileTable.profilePicUrl,
+                },
               })
               .from(teamParticipantTable)
               .innerJoin(
@@ -158,7 +170,11 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
         const [scorers, teamAData, teamBData, winners] = await Promise.all([
           scorerIds.length
             ? db
-                .select()
+                .select({
+                  id: profileTable.id,
+                  name: profileTable.name,
+                  profilePicUrl: profileTable.profilePicUrl,
+                })
                 .from(profileTable)
                 .where(inArray(profileTable.id, scorerIds))
             : Promise.resolve([]),
@@ -736,7 +752,14 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     )
     .get(
       "/participants/:eventId",
-      async ({ db, params: { eventId } }) => {
+      async ({ db, user, params: { eventId } }) => {
+        if (!(await canViewEvent(db, user.id, eventId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view participants for this event",
+          });
+        }
+
         const teams = await db
           .select()
           .from(teamTable)
@@ -748,7 +771,11 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               .select({
                 teamId: teamParticipantTable.teamId,
                 userId: teamParticipantTable.userId,
-                user: profileTable,
+                user: {
+                  id: profileTable.id,
+                  name: profileTable.name,
+                  profilePicUrl: profileTable.profilePicUrl,
+                },
               })
               .from(teamParticipantTable)
               .innerJoin(
@@ -782,8 +809,15 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     )
     .get(
       "/results/:eventId",
-      async ({ db, params: { eventId } }) => {
+      async ({ db, user, params: { eventId } }) => {
         try {
+          if (!(await canViewEvent(db, user.id, eventId))) {
+            return sendResponse({
+              success: false,
+              message: "You are not authorized to view results for this event",
+            });
+          }
+
           const [eventRow] = await db
             .select({
               event: eventTable,

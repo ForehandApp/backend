@@ -9,6 +9,7 @@ import {
   invitesTable,
   organizationInvitesTable,
   profileTable,
+  tournamentTable,
   tournamentInvitesTable,
   tournamentVolunteerTable,
 } from "@/services/db/schema";
@@ -28,6 +29,55 @@ function phoneLookupVariants(phone: string) {
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
 
+async function getTournamentCrewManagerAccess(
+  db: any,
+  userId: string,
+  tournamentId: string,
+) {
+  const [tournament] = await db
+    .select({
+      id: tournamentTable.id,
+      organizationId: tournamentTable.organizationId,
+    })
+    .from(tournamentTable)
+    .where(eq(tournamentTable.id, tournamentId))
+    .limit(1);
+
+  if (!tournament) {
+    return { exists: false, allowed: false };
+  }
+
+  const [organizationMemberRows, tournamentAdminRows] = await Promise.all([
+    db
+      .select({ userId: organizationMemberTable.userId })
+      .from(organizationMemberTable)
+      .where(
+        and(
+          eq(organizationMemberTable.organizationId, tournament.organizationId),
+          eq(organizationMemberTable.userId, userId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({ userId: tournamentVolunteerTable.userId })
+      .from(tournamentVolunteerTable)
+      .where(
+        and(
+          eq(tournamentVolunteerTable.tournamentId, tournament.id),
+          eq(tournamentVolunteerTable.userId, userId),
+          eq(tournamentVolunteerTable.role, "admin"),
+        ),
+      )
+      .limit(1),
+  ]);
+
+  return {
+    exists: true,
+    allowed:
+      organizationMemberRows.length > 0 || tournamentAdminRows.length > 0,
+  };
+}
+
 export const inviteRoutes = protectedApi.group("/invite", (app) =>
   app
     .post(
@@ -41,6 +91,26 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
             phone: body.phone,
             contextType: body.contextType,
           });
+
+          const access = await getTournamentCrewManagerAccess(
+            db,
+            user.id,
+            body.tournamentId,
+          );
+
+          if (!access.exists) {
+            return sendResponse({
+              success: false,
+              message: "Tournament not found.",
+            });
+          }
+
+          if (!access.allowed) {
+            return sendResponse({
+              success: false,
+              message: "You are not allowed to invite tournament crew.",
+            });
+          }
 
           const [inviteType] = await db
             .select({
@@ -137,7 +207,7 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
         body: t.Object({
           phone: t.String({ pattern: "^[6-9]\\d{9}$" }),
           role: t.Union([t.Literal("admin"), t.Literal("scorer")]),
-          tournamentId: t.String(),
+          tournamentId: t.String({ format: "uuid" }),
           organizationId: t.Optional(t.String()),
           contextType: t.Optional(t.String()),
           notifyReceiver: t.Optional(t.Boolean()),
@@ -416,6 +486,8 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           .select({
             inviteId: invitesTable.id,
             senderId: invitesTable.senderId,
+            receiverId: invitesTable.receiverId,
+            inviteState: invitesTable.inviteState,
           })
           .from(organizationInvitesTable)
           .innerJoin(
@@ -437,14 +509,32 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           });
         }
 
-        const member = await db.query.organizationMemberTable.findFirst({
-          where: {
-            organizationId: body.organizationId,
-            userId: user.id,
-          },
-        });
+        const [member, targetMembership] = await Promise.all([
+          db.query.organizationMemberTable.findFirst({
+            where: {
+              organizationId: body.organizationId,
+              userId: user.id,
+            },
+          }),
+          db.query.organizationMemberTable.findFirst({
+            where: {
+              organizationId: body.organizationId,
+              userId: row.receiverId,
+            },
+          }),
+        ]);
 
-        if (!member && row.senderId !== user.id) {
+        if (targetMembership?.isOwner) {
+          return sendResponse({
+            success: false,
+            message: "Organization owners cannot be removed from members.",
+          });
+        }
+
+        const isPendingInviteSender =
+          row.inviteState === "pending" && row.senderId === user.id;
+
+        if (!member && !isPendingInviteSender) {
           return sendResponse({
             success: false,
             message:
@@ -452,26 +542,75 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           });
         }
 
-        await db
-          .delete(organizationInvitesTable)
-          .where(
-            and(
-              eq(organizationInvitesTable.inviteId, body.inviteId),
-              eq(organizationInvitesTable.organizationId, body.organizationId),
-            ),
+        const organizationTournamentRows = await db
+          .select({ id: tournamentTable.id })
+          .from(tournamentTable)
+          .where(eq(tournamentTable.organizationId, body.organizationId));
+        const organizationTournamentIds = organizationTournamentRows.map(
+          (tournament) => tournament.id,
+        );
+
+        await db.transaction(async (tx) => {
+          const receiverInviteRows = await tx
+            .select({ inviteId: invitesTable.id })
+            .from(organizationInvitesTable)
+            .innerJoin(
+              invitesTable,
+              eq(organizationInvitesTable.inviteId, invitesTable.id),
+            )
+            .where(
+              and(
+                eq(organizationInvitesTable.organizationId, body.organizationId),
+                eq(invitesTable.receiverId, row.receiverId),
+              ),
+            );
+          const receiverInviteIds = receiverInviteRows.map(
+            (inviteRow) => inviteRow.inviteId,
           );
 
-        await db.delete(invitesTable).where(eq(invitesTable.id, body.inviteId));
+          if (receiverInviteIds.length > 0) {
+            await tx
+              .delete(organizationInvitesTable)
+              .where(inArray(organizationInvitesTable.inviteId, receiverInviteIds));
+            await tx
+              .delete(invitesTable)
+              .where(inArray(invitesTable.id, receiverInviteIds));
+          }
+
+          await tx
+            .delete(organizationMemberTable)
+            .where(
+              and(
+                eq(organizationMemberTable.organizationId, body.organizationId),
+                eq(organizationMemberTable.userId, row.receiverId),
+                eq(organizationMemberTable.isOwner, false),
+              ),
+            );
+
+          if (organizationTournamentIds.length > 0) {
+            await tx
+              .delete(tournamentVolunteerTable)
+              .where(
+                and(
+                  inArray(
+                    tournamentVolunteerTable.tournamentId,
+                    organizationTournamentIds,
+                  ),
+                  eq(tournamentVolunteerTable.userId, row.receiverId),
+                ),
+              );
+          }
+        });
 
         return sendResponse({
           success: true,
-          message: "Organization member invite removed successfully.",
+          message: "Organization member removed successfully.",
         });
       },
       {
         body: t.Object({
-          inviteId: t.String(),
-          organizationId: t.String(),
+          inviteId: t.String({ format: "uuid" }),
+          organizationId: t.String({ format: "uuid" }),
         }),
       },
     )
@@ -569,6 +708,26 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           tournamentId: body.tournamentId,
           inviteOrUserId: body.inviteId,
         });
+
+        const access = await getTournamentCrewManagerAccess(
+          db,
+          user.id,
+          body.tournamentId,
+        );
+
+        if (!access.exists) {
+          return sendResponse({
+            success: false,
+            message: "Tournament not found.",
+          });
+        }
+
+        if (!access.allowed) {
+          return sendResponse({
+            success: false,
+            message: "You are not allowed to remove tournament crew.",
+          });
+        }
 
         const [row] = await db
           .select({
@@ -676,13 +835,6 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
           });
         }
 
-        if (row.senderId !== user.id) {
-          return sendResponse({
-            success: false,
-            message: "You are not allowed to remove this crew invite.",
-          });
-        }
-
         await db.transaction(async (tx) => {
           await tx
             .delete(tournamentInvitesTable)
@@ -721,8 +873,8 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
       },
       {
         body: t.Object({
-          inviteId: t.String(),
-          tournamentId: t.String(),
+          inviteId: t.String({ format: "uuid" }),
+          tournamentId: t.String({ format: "uuid" }),
         }),
       },
     )

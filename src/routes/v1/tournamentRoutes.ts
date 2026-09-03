@@ -22,6 +22,7 @@ import {
 import { inArray, eq, notInArray, or, and } from "drizzle-orm";
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
+import { canViewTournament } from "@/utils/access";
 import { t } from "elysia";
 
 function sanitizeTournamentTree(tournament: any) {
@@ -169,7 +170,6 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                     id: profileTable.id,
                     name: profileTable.name,
                     profilePicUrl: profileTable.profilePicUrl,
-                    profilePicPath: profileTable.profilePicPath,
                   },
                 })
                 .from(teamParticipantTable)
@@ -332,10 +332,21 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
     )
     .get(
       "/participants/:tournamentId",
-      async ({ db, params: { tournamentId } }) => {
+      async ({ db, user, params: { tournamentId } }) => {
+        if (!(await canViewTournament(db, user.id, tournamentId))) {
+          return sendResponse({
+            success: false,
+            message: "You are not authorized to view participants for this tournament",
+          });
+        }
+
         const participants = await db
           .select({
-            user: profileTable,
+            user: {
+              id: profileTable.id,
+              name: profileTable.name,
+              profilePicUrl: profileTable.profilePicUrl,
+            },
             team: teamTable,
             event: eventTable,
           })
