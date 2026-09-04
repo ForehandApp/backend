@@ -24,9 +24,14 @@ import {
   teamTypesTable,
 } from "@/services/db/schema";
 import { profileTable } from "@/services/db/schema";
-import { getDate } from "@/utils/helpers";
+import {
+  formatDateOnly,
+  getDate,
+  getDateOnly,
+  getDateOnlyTime,
+} from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
-import { canViewEvent } from "@/utils/access";
+import { canViewEvent, isTournamentManager } from "@/utils/access";
 import { t } from "elysia";
 
 export const eventRoutes = protectedApi.group("/event", (app) =>
@@ -53,6 +58,17 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             message: "You are not authorized to view this event",
           });
         }
+
+        console.info("[DueDateDebug] backend-event-detail-loaded", {
+          requestedEventId: eventId,
+          loadedEventId: event.id,
+          eventName: event.name,
+          eventTournamentId: event.tournamentId,
+          rawDueDate: event.dueDate,
+          rawStartDate: event.startDate,
+          normalizedDueDate: formatDateOnly(event.dueDate),
+          normalizedStartDate: formatDateOnly(event.startDate),
+        });
 
         const [tournament, sportsOption, eventFormat, teamType, paymentMode] =
           await Promise.all([
@@ -338,6 +354,30 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
+          let dueDate: Date;
+          let startDate: Date;
+          let playerBornAfter: Date | null = null;
+          try {
+            dueDate = getDateOnly(event.dueDate);
+            startDate = getDateOnly(event.startDate);
+            playerBornAfter =
+              event.playerBornAfter !== null
+                ? getDateOnly(event.playerBornAfter!)
+                : null;
+          } catch {
+            return sendResponse({
+              success: false,
+              message: "Invalid event date",
+            });
+          }
+
+          if (dueDate.getTime() > startDate.getTime()) {
+            return sendResponse({
+              success: false,
+              message: `Due date cannot be after event start date. Selected due date: ${formatDateOnly(dueDate)}. Event start date: ${formatDateOnly(startDate)}.`,
+            });
+          }
+
           await db.insert(eventTable).values({
             tournamentId: event.tournamentId,
             name: event.name,
@@ -345,8 +385,8 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             formatId: eventFormat.id,
             gender: event.gender,
 
-            dueDate: getDate(event.dueDate),
-            startDate: getDate(event.startDate),
+            dueDate,
+            startDate,
 
             teamTypeId: teamType.id,
 
@@ -355,10 +395,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
 
             paymentModeId: paymentMode?.id,
             amount: event.amount,
-            playerBornAfter:
-              event.playerBornAfter !== null
-                ? getDate(event.playerBornAfter!)
-                : null,
+            playerBornAfter,
           });
         }
         return sendResponse({
@@ -389,90 +426,94 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     .delete(
       "/:eventId",
       async ({ db, user, params: { eventId } }) => {
-        const event = await db.query.eventTable.findFirst({
-          where: { id: eventId },
-          with: {
-            tournament: {
-              columns: { organizationId: true },
+        try {
+          const event = await db.query.eventTable.findFirst({
+            where: { id: eventId },
+            with: {
+              tournament: true,
             },
-          },
-        });
-
-        if (!event || !event.tournament) {
-          return sendResponse({
-            success: false,
-            message: "Event or related tournament not found",
           });
-        }
 
-        const member = await db.query.organizationMemberTable.findFirst({
-          where: {
-            organizationId: event.tournament.organizationId,
+          if (!event || !event.tournament) {
+            return sendResponse({
+              success: false,
+              message: "Event or related tournament not found",
+            });
+          }
+
+          if (!(await isTournamentManager(db, user.id, event.tournament))) {
+            return sendResponse({
+              success: false,
+              message: "You are not eligible to delete this event",
+            });
+          }
+
+          await db.transaction(async (tx) => {
+            const eventInvites = await tx
+              .select({ inviteId: eventInvitesTable.inviteId })
+              .from(eventInvitesTable)
+              .where(eq(eventInvitesTable.eventId, eventId));
+
+            const eventInviteIds = eventInvites.map((ei) => ei.inviteId);
+
+            if (eventInviteIds.length > 0) {
+              await tx
+                .delete(eventInvitesTable)
+                .where(eq(eventInvitesTable.eventId, eventId));
+              await tx
+                .delete(invitesTable)
+                .where(inArray(invitesTable.id, eventInviteIds));
+            }
+
+            const matches = await tx
+              .select({ id: matchTable.id })
+              .from(matchTable)
+              .where(eq(matchTable.eventId, eventId));
+
+            const matchIds = matches.map((m) => m.id);
+
+            if (matchIds.length > 0) {
+              await tx
+                .delete(setTable)
+                .where(inArray(setTable.matchId, matchIds));
+              await tx.delete(matchTable).where(inArray(matchTable.id, matchIds));
+            }
+
+            const teams = await tx
+              .select({ id: teamTable.id })
+              .from(teamTable)
+              .where(eq(teamTable.eventId, eventId));
+
+            const teamIds = teams.map((t) => t.id);
+
+            if (teamIds.length > 0) {
+              await tx
+                .delete(teamParticipantTable)
+                .where(inArray(teamParticipantTable.teamId, teamIds));
+              await tx
+                .delete(teamActionLogsTable)
+                .where(inArray(teamActionLogsTable.teamId, teamIds));
+              await tx.delete(teamTable).where(inArray(teamTable.id, teamIds));
+            }
+
+            await tx.delete(eventTable).where(eq(eventTable.id, eventId));
+          });
+
+          return sendResponse({
+            success: true,
+            message: "Event and all related data deleted successfully",
+          });
+        } catch (error) {
+          console.error("[EventDelete] failed", {
+            eventId,
             userId: user.id,
-          },
-        });
-        if (!member) {
+            message: error instanceof Error ? error.message : String(error),
+          });
           return sendResponse({
             success: false,
-            message: "You are not eligible to delete this event",
+            message: "Failed to delete event",
           });
         }
-
-        await db.transaction(async (tx) => {
-          // Delete event invites
-          const eventInvites = await tx
-            .select({ inviteId: eventInvitesTable.inviteId })
-            .from(eventInvitesTable)
-            .where(eq(eventInvitesTable.eventId, eventId));
-
-          const eventInviteIds = eventInvites.map((ei) => ei.inviteId);
-
-          if (eventInviteIds.length > 0) {
-            await tx
-              .delete(eventInvitesTable)
-              .where(inArray(eventInvitesTable.inviteId, eventInviteIds));
-            await tx
-              .delete(invitesTable)
-              .where(inArray(invitesTable.id, eventInviteIds));
-          }
-
-          const matches = await tx
-            .select({ id: matchTable.id })
-            .from(matchTable)
-            .where(eq(matchTable.eventId, eventId));
-
-          const matchIds = matches.map((m) => m.id);
-
-          if (matchIds.length > 0) {
-            await tx
-              .delete(setTable)
-              .where(inArray(setTable.matchId, matchIds));
-            await tx.delete(matchTable).where(inArray(matchTable.id, matchIds));
-          }
-
-          const teams = await tx
-            .select({ id: teamTable.id })
-            .from(teamTable)
-            .where(eq(teamTable.eventId, eventId));
-
-          const teamIds = teams.map((t) => t.id);
-
-          if (teamIds.length > 0) {
-            await tx
-              .delete(teamParticipantTable)
-              .where(inArray(teamParticipantTable.teamId, teamIds));
-            await tx
-              .delete(teamActionLogsTable)
-              .where(inArray(teamActionLogsTable.teamId, teamIds));
-            await tx.delete(teamTable).where(inArray(teamTable.id, teamIds));
-          }
-
-          await tx.delete(eventTable).where(eq(eventTable.id, eventId));
-        });
-        return sendResponse({
-          success: true,
-          message: "Event and all related data deleted successfully",
-        });
       },
       {
         params: t.Object({ eventId: t.String({ format: "uuid" }) }),
@@ -481,16 +522,22 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     .patch(
       "/:eventId",
       async ({ db, user, params: { eventId }, body }) => {
-        const event = await db.query.eventTable.findFirst({
-          where: {
-            id: eventId
-          },
-          with: {
-            tournament: true,
-          },
-        });
+        const [event] = await db
+          .select()
+          .from(eventTable)
+          .where(eq(eventTable.id, eventId))
+          .limit(1);
 
-        if (!event || !event.tournament) {
+        const tournament = event
+          ? await db
+              .select()
+              .from(tournamentTable)
+              .where(eq(tournamentTable.id, event.tournamentId))
+              .limit(1)
+              .then((rows) => rows[0] ?? null)
+          : null;
+
+        if (!event || !tournament) {
           return sendResponse({
             success: false,
             message: "Event or related tournament not found",
@@ -500,7 +547,7 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
         const member = await db.query.organizationMemberTable.findFirst({
           where: ((table: any, { eq, and }: any) =>
             and(
-              eq(table.organizationId, event.tournament!.organizationId),
+              eq(table.organizationId, tournament.organizationId),
               eq(table.userId, user.id),
             )) as any,
         });
@@ -519,19 +566,30 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
         if (body.setsPerMatch !== undefined) updateValues.setsPerMatch = body.setsPerMatch;
         if (body.amount !== undefined) updateValues.amount = body.amount;
 
-        if (body.dueDate !== undefined) updateValues.dueDate = getDate(body.dueDate);
-        if (body.startDate !== undefined) updateValues.startDate = getDate(body.startDate);
-        if (body.playerBornAfter !== undefined) {
-          updateValues.playerBornAfter = body.playerBornAfter !== null ? getDate(body.playerBornAfter) : null;
+        try {
+          if (body.dueDate !== undefined) updateValues.dueDate = getDateOnly(body.dueDate);
+          if (body.startDate !== undefined) updateValues.startDate = getDateOnly(body.startDate);
+          if (body.playerBornAfter !== undefined) {
+            updateValues.playerBornAfter = body.playerBornAfter !== null ? getDateOnly(body.playerBornAfter) : null;
+          }
+        } catch {
+          return sendResponse({
+            success: false,
+            message: "Invalid event date",
+          });
         }
 
         // Validate due date is not after start date if either is modified
-        const finalDueDate = updateValues.dueDate !== undefined ? updateValues.dueDate : getDate(String(event.dueDate));
-        const finalStartDate = updateValues.startDate !== undefined ? updateValues.startDate : getDate(String(event.startDate));
-        if (finalDueDate.getTime() > finalStartDate.getTime()) {
+        const finalDueDate =
+          updateValues.dueDate !== undefined ? updateValues.dueDate : event.dueDate;
+        const finalStartDate =
+          updateValues.startDate !== undefined ? updateValues.startDate : event.startDate;
+        const finalDueDateTime = getDateOnlyTime(finalDueDate);
+        const finalStartDateTime = getDateOnlyTime(finalStartDate);
+        if (finalDueDateTime > finalStartDateTime) {
           return sendResponse({
             success: false,
-            message: "Due date cannot be after event start date",
+            message: `Due date cannot be after event start date. Selected due date: ${formatDateOnly(finalDueDate)}. Event start date: ${formatDateOnly(finalStartDate)}.`,
           });
         }
 
@@ -633,24 +691,51 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     .post(
       "/update-due-date/:eventId",
       async ({ db, user, body, params: { eventId } }) => {
-        const event = await db.query.eventTable.findFirst({
-          where: ((table: any, { eq }: any) => eq(table.id, eventId)) as any,
-          with: {
-            tournament: true,
-          },
+        console.info("[DueDateDebug] backend-update-due-date-request", {
+          eventId,
+          requestedDueDate: body.dueDate,
         });
 
-        if (!event || !event.tournament) {
+        const [event] = await db
+          .select()
+          .from(eventTable)
+          .where(eq(eventTable.id, eventId))
+          .limit(1);
+
+        const tournament = event
+          ? await db
+              .select()
+              .from(tournamentTable)
+              .where(eq(tournamentTable.id, event.tournamentId))
+              .limit(1)
+              .then((rows) => rows[0] ?? null)
+          : null;
+
+        if (!event || !tournament) {
           return sendResponse({
             success: false,
             message: "Event or related tournament not found",
           });
         }
 
+        console.info("[DueDateDebug] backend-event-loaded", {
+          requestedEventId: eventId,
+          loadedEventId: event.id,
+          eventName: event.name,
+          eventTournamentId: event.tournamentId,
+          routeTournamentId: tournament.id,
+          rawDueDate: event.dueDate,
+          rawStartDate: event.startDate,
+          normalizedDueDate: formatDateOnly(event.dueDate),
+          normalizedStartDate: formatDateOnly(event.startDate),
+          tournamentStartDate: tournament.startDate,
+          normalizedTournamentStartDate: formatDateOnly(tournament.startDate),
+        });
+
         const member = await db.query.organizationMemberTable.findFirst({
           where: ((table: any, { eq, and }: any) =>
             and(
-              eq(table.organizationId, event.tournament!.organizationId),
+              eq(table.organizationId, tournament.organizationId),
               eq(table.userId, user.id),
             )) as any,
         });
@@ -662,12 +747,43 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           });
         }
 
-        const newDueDate = getDate(body.dueDate);
-        const eventStartDate = getDate(String(event.startDate));
-        if (newDueDate.getTime() > eventStartDate.getTime()) {
+        let newDueDate: Date;
+        let eventStartDate: Date;
+        try {
+          newDueDate = getDateOnly(body.dueDate);
+          eventStartDate = getDateOnly(event.startDate);
+        } catch {
+          console.error("[DueDateDebug] backend-invalid-date", {
+            eventId,
+            requestedDueDate: body.dueDate,
+            eventStartDate: event.startDate,
+          });
           return sendResponse({
             success: false,
-            message: "Due date cannot be after event start date",
+            message: "Invalid event date",
+          });
+        }
+
+        const requestedDueDateTime = getDateOnlyTime(newDueDate);
+        const eventStartDateTime = getDateOnlyTime(eventStartDate);
+        const isAfterEventStartDate =
+          requestedDueDateTime > eventStartDateTime;
+
+        console.info("[DueDateDebug] backend-date-compare", {
+          eventId,
+          requestedDueDateRaw: body.dueDate,
+          requestedDueDate: formatDateOnly(newDueDate),
+          eventStartDateRaw: event.startDate,
+          eventStartDate: formatDateOnly(eventStartDate),
+          requestedDueDateTime,
+          eventStartDateTime,
+          isAfterEventStartDate,
+        });
+
+        if (isAfterEventStartDate) {
+          return sendResponse({
+            success: false,
+            message: `Due date cannot be after event start date. Selected due date: ${formatDateOnly(newDueDate)}. Event start date: ${formatDateOnly(event.startDate)}.`,
           });
         }
 

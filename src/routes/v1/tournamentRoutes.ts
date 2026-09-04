@@ -20,7 +20,7 @@ import {
   teamTypesTable,
 } from "@/services/db/schema";
 import { inArray, eq, notInArray, or, and } from "drizzle-orm";
-import { getDate } from "@/utils/helpers";
+import { formatDateOnly, getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { canViewTournament } from "@/utils/access";
 import { t } from "elysia";
@@ -49,6 +49,24 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             organization: true,
           },
           where: { id: tournamentId },
+        });
+
+        console.info("[DueDateDebug] backend-tournament-info-loaded", {
+          tournamentId,
+          tournamentStartDate: tournament?.startDate ?? null,
+          normalizedTournamentStartDate: tournament?.startDate
+            ? formatDateOnly(tournament.startDate)
+            : null,
+          events: Array.isArray(tournament?.events)
+            ? tournament.events.map((event: any) => ({
+                eventId: event.id,
+                eventName: event.name,
+                rawDueDate: event.dueDate,
+                rawStartDate: event.startDate,
+                normalizedDueDate: formatDateOnly(event.dueDate),
+                normalizedStartDate: formatDateOnly(event.startDate),
+              }))
+            : [],
         });
 
         const sanitizedTournament = sanitizeTournamentTree(tournament);
