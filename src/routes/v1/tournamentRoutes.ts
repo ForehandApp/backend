@@ -30,6 +30,17 @@ function sanitizeTournamentTree(tournament: any) {
   return tournament;
 }
 
+const joinedTeamStatuses = new Set(["participating", "eliminated", "confirmed"]);
+const waitingListTeamStatuses = new Set(["registered", "waiting", "waitlist"]);
+
+function isJoinedTeamStatus(status: unknown) {
+  return joinedTeamStatuses.has(String(status || "").toLowerCase());
+}
+
+function isWaitingListTeamStatus(status: unknown) {
+  return waitingListTeamStatuses.has(String(status || "").toLowerCase());
+}
+
 export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
   app
     .get(
@@ -1138,6 +1149,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .select({
                   tournamentId: eventTable.tournamentId,
                   eventId: eventTable.id,
+                  teamStatus: teamTable.teamStatus,
                 })
                 .from(teamParticipantTable)
                 .innerJoin(
@@ -1147,14 +1159,23 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
                 .where(eq(teamParticipantTable.userId, user.id));
 
+              const confirmedJoinedRows =
+                joinedTournamentsQuery.filter((row) =>
+                  isJoinedTeamStatus(row.teamStatus),
+                );
+              const waitingListTournamentIds = new Set(
+                joinedTournamentsQuery
+                  .filter((row) => isWaitingListTeamStatus(row.teamStatus))
+                  .map((row) => row.tournamentId),
+              );
               const joinedTournamentIds = [
                 ...new Set(
-                  joinedTournamentsQuery.map((row) => row.tournamentId),
+                  confirmedJoinedRows.map((row) => row.tournamentId),
                 ),
               ];
               const joinedTournamentIdSet = new Set(joinedTournamentIds);
               const joinedEventIds = new Set(
-                joinedTournamentsQuery.map((row) => row.eventId),
+                confirmedJoinedRows.map((row) => row.eventId),
               );
 
               const browseTournaments = await db.query.tournamentTable.findMany({
@@ -1175,14 +1196,21 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 },
               });
 
-              const browse = browseTournaments.filter((t) => {
-                if (joinedTournamentIdSet.has(t.id)) return false;
+              const browse = browseTournaments
+                .filter((t) => {
+                  if (joinedTournamentIdSet.has(t.id)) return false;
 
-                return t.events.some(
-                  (event: any) =>
-                    event.gender === null || event.gender === userProfile.gender,
+                  return t.events.some(
+                    (event: any) =>
+                      event.gender === null ||
+                      event.gender === userProfile.gender,
+                  );
+                })
+                .map((t) =>
+                  waitingListTournamentIds.has(t.id)
+                    ? { ...t, userRegistrationStatus: "waiting_list" }
+                    : t,
                 );
-              });
 
               let joined: any[] = [];
               if (joinedTournamentIds.length > 0) {
@@ -1245,7 +1273,10 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               const userGender = userProfile.gender;
 
               const joinedTournamentsQuery = await db
-                .select({ id: eventTable.tournamentId })
+                .select({
+                  id: eventTable.tournamentId,
+                  teamStatus: teamTable.teamStatus,
+                })
                 .from(teamParticipantTable)
                 .innerJoin(
                   teamTable,
@@ -1255,7 +1286,14 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .where(eq(teamParticipantTable.userId, user.id));
 
               const joinedTournamentIds = new Set(
-                joinedTournamentsQuery.map((r) => r.id),
+                joinedTournamentsQuery
+                  .filter((r) => isJoinedTeamStatus(r.teamStatus))
+                  .map((r) => r.id),
+              );
+              const waitingListTournamentIds = new Set(
+                joinedTournamentsQuery
+                  .filter((r) => isWaitingListTeamStatus(r.teamStatus))
+                  .map((r) => r.id),
               );
 
               const tournaments = await db.query.tournamentTable.findMany({
@@ -1276,15 +1314,21 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 },
               });
 
-              const filtered = tournaments.filter((t) => {
-                if (joinedTournamentIds.has(t.id)) return false;
+              const filtered = tournaments
+                .filter((t) => {
+                  if (joinedTournamentIds.has(t.id)) return false;
 
-                // Check if any event is eligible for the user's gender
-                return t.events.some(
-                  (event: any) =>
-                    event.gender === null || event.gender === userGender,
+                  // Check if any event is eligible for the user's gender
+                  return t.events.some(
+                    (event: any) =>
+                      event.gender === null || event.gender === userGender,
+                  );
+                })
+                .map((t) =>
+                  waitingListTournamentIds.has(t.id)
+                    ? { ...t, userRegistrationStatus: "waiting_list" }
+                    : t,
                 );
-              });
 
               return sendResponse({
                 success: true,
@@ -1297,6 +1341,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .select({
                   tournamentId: eventTable.tournamentId,
                   eventId: eventTable.id,
+                  teamStatus: teamTable.teamStatus,
                 })
                 .from(teamParticipantTable)
                 .innerJoin(
@@ -1306,11 +1351,15 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
                 .where(eq(teamParticipantTable.userId, user.id));
 
+              const confirmedJoinedRows =
+                joinedTournamentsQuery.filter((r) =>
+                  isJoinedTeamStatus(r.teamStatus),
+                );
               const joinedTournamentIds = [
-                ...new Set(joinedTournamentsQuery.map((r) => r.tournamentId)),
+                ...new Set(confirmedJoinedRows.map((r) => r.tournamentId)),
               ];
               const joinedEventIds = new Set(
-                joinedTournamentsQuery.map((r) => r.eventId),
+                confirmedJoinedRows.map((r) => r.eventId),
               );
 
               if (joinedTournamentIds.length === 0) {
@@ -1363,6 +1412,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .select({
                   tournamentId: eventTable.tournamentId,
                   eventId: eventTable.id,
+                  teamStatus: teamTable.teamStatus,
                 })
                 .from(teamParticipantTable)
                 .innerJoin(
@@ -1372,11 +1422,15 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
                 .where(eq(teamParticipantTable.userId, user.id));
 
+              const confirmedJoinedRows =
+                joinedTournamentsQuery.filter((r) =>
+                  isJoinedTeamStatus(r.teamStatus),
+                );
               const joinedTournamentIds = [
-                ...new Set(joinedTournamentsQuery.map((r) => r.tournamentId)),
+                ...new Set(confirmedJoinedRows.map((r) => r.tournamentId)),
               ];
               const joinedEventIds = new Set(
-                joinedTournamentsQuery.map((r) => r.eventId),
+                confirmedJoinedRows.map((r) => r.eventId),
               );
 
               if (joinedTournamentIds.length === 0) {
