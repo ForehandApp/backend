@@ -11,7 +11,9 @@ import {
   publicTestingRoutes,
   protectedTestingRoutes,
 } from "@/routes/v1/testRoutes";
+import { db } from "@/services/db/client";
 import { supabase } from "@/services/supabase/client";
+import { canViewMatch, canViewTournament } from "@/utils/access";
 import Elysia from "elysia";
 
 const UUID_PATTERN =
@@ -21,16 +23,25 @@ function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
 }
 
-function canSubscribeToTournament(userId: string, tournamentId: string) {
-  return Boolean(userId && tournamentId);
-}
-
-function canSubscribeToMatch(userId: string, matchId: string) {
-  return Boolean(userId && matchId);
-}
-
 function sendWsError(ws: any, message: string) {
   ws.send(JSON.stringify({ type: "ERROR", message }));
+}
+
+async function authenticateWs(ws: any, token: string) {
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser(token);
+
+  if (error || !user) {
+    sendWsError(ws, "Unauthorized: Invalid token");
+    ws.close();
+    return null;
+  }
+
+  (ws.data as any).user = user;
+  ws.send(JSON.stringify({ type: "AUTH_SUCCESS", message: "Authenticated" }));
+  return user;
 }
 
 export const apiV1 = new Elysia().group("v1", (app) =>
@@ -47,47 +58,31 @@ export const apiV1 = new Elysia().group("v1", (app) =>
     .use(optionsRoutes)
     .use(protectedTestingRoutes)
     .ws("/ws", {
-      async open(ws) {
-        const token = ws.data.query.token;
-        if (!token) {
-          ws.send(
-            JSON.stringify({
-              type: "ERROR",
-              message: "Unauthorized: No token provided",
-            }),
-          );
-          ws.close();
-          return;
-        }
-
-        const {
-          data: { user },
-          error,
-        } = await supabase.auth.getUser(token);
-        if (error || !user) {
-          ws.send(
-            JSON.stringify({
-              type: "ERROR",
-              message: "Unauthorized: Invalid token",
-            }),
-          );
-          ws.close();
-          return;
-        }
-
-        // User authenticated
-        (ws.data as any).user = user;
-        ws.send(JSON.stringify({ type: "AUTH_SUCCESS", message: "Authenticated" }));
-      },
       async message(ws, message: any) {
-        const user = (ws.data as any).user;
-        if (!user) return;
         let payload: any;
 
         try {
           payload = typeof message === "string" ? JSON.parse(message) : message;
         } catch {
           sendWsError(ws, "Invalid websocket message");
+          return;
+        }
+
+        if (payload.type === "AUTH") {
+          const token = typeof payload.token === "string" ? payload.token : "";
+          if (!token) {
+            sendWsError(ws, "Unauthorized: No token provided");
+            ws.close();
+            return;
+          }
+          await authenticateWs(ws, token);
+          return;
+        }
+
+        const user = (ws.data as any).user;
+        if (!user) {
+          sendWsError(ws, "Unauthorized: Authenticate before subscribing");
+          ws.close();
           return;
         }
 
@@ -98,7 +93,7 @@ export const apiV1 = new Elysia().group("v1", (app) =>
             return;
           }
 
-          const allowed = canSubscribeToMatch(user.id, matchId);
+          const allowed = await canViewMatch(db, user.id, matchId);
           if (!allowed) {
             sendWsError(ws, "Unauthorized: Cannot access this match");
             return;
@@ -115,7 +110,7 @@ export const apiV1 = new Elysia().group("v1", (app) =>
             return;
           }
 
-          const allowed = canSubscribeToTournament(user.id, tournamentId);
+          const allowed = await canViewTournament(db, user.id, tournamentId);
           if (!allowed) {
             sendWsError(ws, "Unauthorized: Cannot access this tournament");
             return;
