@@ -21,6 +21,19 @@ const configuredAuthCacheMs = Number(Bun.env.AUTH_VALIDATION_CACHE_MS);
 const AUTH_VALIDATION_CACHE_MS = Number.isFinite(configuredAuthCacheMs)
   ? Math.max(0, Math.min(configuredAuthCacheMs, MAX_AUTH_VALIDATION_CACHE_MS))
   : DEFAULT_AUTH_VALIDATION_CACHE_MS;
+const DEFAULT_ALLOWED_CORS_ORIGINS = [
+  "https://forehandapp.com",
+  "https://www.forehandapp.com",
+  "https://frontend-silk-three-36.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
+];
+const allowedCorsOrigins = new Set(
+  (Bun.env.CORS_ALLOWED_ORIGINS || DEFAULT_ALLOWED_CORS_ORIGINS.join(","))
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
 
 function getTokenCacheKey(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -73,7 +86,16 @@ function cacheAuthUser(tokenKey: string, token: string, user: any) {
 
 const baseApi = new Elysia()
   .use(logger())
-  .use(cors())
+  .use(
+    cors({
+      origin: (request) => {
+        const origin = request.headers.get("origin");
+        return !origin || allowedCorsOrigins.has(origin);
+      },
+      allowedHeaders: ["Authorization", "Content-Type"],
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    }),
+  )
   .decorate("supabase", supabase)
   .decorate("db", db)
   .onError(({ error, set }) => {
