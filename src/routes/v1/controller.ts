@@ -92,7 +92,9 @@ const baseApi = new Elysia()
         const origin = request.headers.get("origin");
         return !origin || allowedCorsOrigins.has(origin);
       },
-      allowedHeaders: ["Authorization", "Content-Type"],
+      // The Elysia CORS preflight handler only emits this header when mirroring
+      // requested headers, so keep it enabled for Authorization-bearing calls.
+      allowedHeaders: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     }),
   )
