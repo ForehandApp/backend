@@ -15,7 +15,6 @@ import {
   inArray,
   eq,
   and,
-  notInArray,
 } from "drizzle-orm";
 import {
   sportsOptionsTable,
@@ -1236,16 +1235,16 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               })
               .where(eq(eventTable.id, eventId));
 
-            // Update all teams that are not rejected or disqualified to participating
+            // Only teams confirmed through checkout/admin approval should advance.
             await tx
               .update(teamTable)
               .set({ teamStatus: "participating" })
               .where(
                 and(
                   eq(teamTable.eventId, eventId),
-                  notInArray(teamTable.teamStatus, [
-                    "rejected",
-                    "disqualified",
+                  inArray(teamTable.teamStatus, [
+                    "registered",
+                    "participating",
                   ]),
                 ),
               );

@@ -13,6 +13,7 @@ import {
   isTournamentManager,
   publicProfileColumns,
 } from "@/utils/access";
+import { getDateOnly } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, or } from "drizzle-orm";
 import { t } from "elysia";
@@ -21,7 +22,34 @@ function isRegistrationClosed(event: {
   dueDate: Date | string | null | undefined;
   eventState?: string | null;
 }) {
-  return event.eventState === "registration_closed";
+  if (event.eventState === "registration_closed") return true;
+  if (!event.dueDate) return false;
+
+  try {
+    const dueDate = getDateOnly(event.dueDate);
+    dueDate.setUTCHours(23, 59, 59, 999);
+    return Date.now() > dueDate.getTime();
+  } catch {
+    return false;
+  }
+}
+
+function normalizeTeamTypeCode(code?: string | null) {
+  return String(code || "").toLowerCase();
+}
+
+function getTeamRegistrationError(
+  teamTypeCode: string | null | undefined,
+  participantCount: number,
+) {
+  const normalized = normalizeTeamTypeCode(teamTypeCode);
+  if (normalized === "singles" && participantCount !== 1) {
+    return "Singles registration requires exactly 1 participant";
+  }
+  if (normalized === "doubles" && participantCount !== 2) {
+    return "Doubles registration requires exactly 2 participants";
+  }
+  return null;
 }
 
 export const teamRoutes = protectedApi.group("/team", (app) =>
@@ -53,14 +81,21 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             });
           }
 
-          const participantIds = body.participantIds;
+          const participantIds = [...new Set(body.participantIds)];
+          if (participantIds.length !== body.participantIds.length) {
+            return sendResponse({
+              success: false,
+              message: "Participant list contains duplicate users",
+            });
+          }
           const isManager = event.tournament
             ? await isTournamentManager(db, user.id, event.tournament)
             : false;
+          const teamTypeCode = normalizeTeamTypeCode(event.teamType.code);
 
           // Singles check
           if (
-            event.teamType.code === "singles" &&
+            teamTypeCode === "singles" &&
             participantIds.length !== 1
           ) {
             return sendResponse({
@@ -70,10 +105,21 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           }
 
           // Doubles check
-          if (event.teamType.code === "doubles" && participantIds.length > 2) {
+          if (teamTypeCode === "doubles" && participantIds.length > 2) {
             return sendResponse({
               success: false,
               message: "Doubles event can have at most 2 participants",
+            });
+          }
+
+          if (
+            teamTypeCode === "doubles" &&
+            !isManager &&
+            participantIds.length > 1
+          ) {
+            return sendResponse({
+              success: false,
+              message: "Invite your partner to join doubles registration",
             });
           }
 
@@ -181,8 +227,10 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
               event: {
                 with: {
                   tournament: true,
+                  teamType: true,
                 },
               },
+              participants: true,
             },
           });
 
@@ -198,6 +246,17 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
               success: false,
               message:
                 "You are not eligible to approve teams for this tournament",
+            });
+          }
+
+          const registrationError = getTeamRegistrationError(
+            team.event.teamType?.code,
+            team.participants.length,
+          );
+          if (registrationError) {
+            return sendResponse({
+              success: false,
+              message: registrationError,
             });
           }
 
@@ -306,8 +365,10 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             event: {
               with: {
                 tournament: true,
+                teamType: true,
               },
             },
+            participants: true,
           },
         });
 
@@ -349,6 +410,19 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
             success: false,
             message: "Registration is closed for this event",
           });
+        }
+
+        if (body.state === "registered" || body.state === "participating") {
+          const registrationError = getTeamRegistrationError(
+            team.event.teamType?.code,
+            team.participants.length,
+          );
+          if (registrationError) {
+            return sendResponse({
+              success: false,
+              message: registrationError,
+            });
+          }
         }
 
         await db

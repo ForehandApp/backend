@@ -14,6 +14,7 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
+import { getDateOnly } from "@/utils/helpers";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { t } from "elysia";
@@ -27,6 +28,28 @@ function phoneLookupVariants(phone: string) {
     `+91${tenDigitPhone}`,
     phone,
   ].filter((value, index, values) => value && values.indexOf(value) === index);
+}
+
+function isEventRegistrationClosed(event: {
+  dueDate: Date | string | null | undefined;
+  eventState?: string | null;
+}) {
+  if (event.eventState === "registration_closed") return true;
+  if (!event.dueDate) return false;
+
+  try {
+    const dueDate = getDateOnly(event.dueDate);
+    dueDate.setUTCHours(23, 59, 59, 999);
+    return Date.now() > dueDate.getTime();
+  } catch {
+    return false;
+  }
+}
+
+function isDoublesTeamType(teamType?: { code?: string | null; label?: string | null } | null) {
+  const code = String(teamType?.code || "").toLowerCase();
+  const label = String(teamType?.label || "").toLowerCase();
+  return code.includes("double") || label.includes("double");
 }
 
 async function getTournamentCrewManagerAccess(
@@ -362,6 +385,122 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
               success: false,
               message: "You cannot invite yourself.",
             });
+          }
+
+          const event = await db.query.eventTable.findFirst({
+            where: { id: body.eventId },
+            with: {
+              teamType: true,
+            },
+          });
+
+          if (!event || !event.teamType) {
+            return sendResponse({
+              success: false,
+              message: "Event or team type not found.",
+            });
+          }
+
+          if (!isDoublesTeamType(event.teamType)) {
+            return sendResponse({
+              success: false,
+              message: "Partner invites are only available for doubles events.",
+            });
+          }
+
+          if (isEventRegistrationClosed(event)) {
+            return sendResponse({
+              success: false,
+              message: "Registration is closed for this event.",
+            });
+          }
+
+          const existingReceiverTeam = await db
+            .select({ id: teamTable.id })
+            .from(teamParticipantTable)
+            .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+            .where(
+              and(
+                eq(teamTable.eventId, body.eventId),
+                eq(teamParticipantTable.userId, receiver.id),
+              ),
+            )
+            .limit(1);
+
+          if (existingReceiverTeam.length > 0) {
+            return sendResponse({
+              success: false,
+              message: "This player is already registered for this event.",
+            });
+          }
+
+          const pendingInvite = await db
+            .select({ inviteId: invitesTable.id })
+            .from(eventInvitesTable)
+            .innerJoin(invitesTable, eq(eventInvitesTable.inviteId, invitesTable.id))
+            .where(
+              and(
+                eq(eventInvitesTable.eventId, body.eventId),
+                eq(invitesTable.receiverId, receiver.id),
+                eq(invitesTable.inviteState, "pending"),
+              ),
+            )
+            .limit(1);
+
+          if (pendingInvite.length > 0) {
+            return sendResponse({
+              success: false,
+              message: "This player already has a pending invite for this event.",
+            });
+          }
+
+          if (body.teamId) {
+            const team = await db.query.teamTable.findFirst({
+              where: { id: body.teamId },
+              with: {
+                event: {
+                  with: {
+                    teamType: true,
+                  },
+                },
+                participants: true,
+              },
+            });
+
+            if (!team || team.eventId !== body.eventId || !team.event) {
+              return sendResponse({
+                success: false,
+                message: "Team does not belong to this event.",
+              });
+            }
+
+            if (!isDoublesTeamType(team.event.teamType)) {
+              return sendResponse({
+                success: false,
+                message: "Partner invites are only available for doubles teams.",
+              });
+            }
+
+            if ((team.teamStatus || "").toLowerCase() !== "created") {
+              return sendResponse({
+                success: false,
+                message: "This team is already registered.",
+              });
+            }
+
+            if (team.participants.length >= 2) {
+              return sendResponse({
+                success: false,
+                message: "Doubles team already has 2 participants.",
+              });
+            }
+
+            if (!team.participants.some((participant: any) => participant.userId === user.id)) {
+              return sendResponse({
+                success: false,
+                message: "You can only invite a partner for your own team.",
+              });
+            }
           }
 
           const inviteId = await db.transaction(async (tx) => {
@@ -973,6 +1112,100 @@ export const inviteRoutes = protectedApi.group("/invite", (app) =>
             success: false,
             message: "Invite not found for this user.",
           });
+        }
+
+        if (body.action === "accept" && invite.invteType?.code === "event") {
+          const eventInvite = await db.query.eventInvitesTable.findFirst({
+            where: { inviteId: invite.id },
+            with: {
+              event: {
+                with: {
+                  teamType: true,
+                },
+              },
+              team: {
+                with: {
+                  event: {
+                    with: {
+                      teamType: true,
+                    },
+                  },
+                  participants: true,
+                },
+              },
+            },
+          });
+
+          if (!eventInvite?.event || !eventInvite.event.teamType) {
+            return sendResponse({
+              success: false,
+              message: "Event invite details not found.",
+            });
+          }
+
+          if (!isDoublesTeamType(eventInvite.event.teamType)) {
+            return sendResponse({
+              success: false,
+              message: "Partner invites are only available for doubles events.",
+            });
+          }
+
+          if (isEventRegistrationClosed(eventInvite.event)) {
+            return sendResponse({
+              success: false,
+              message: "Registration is closed for this event.",
+            });
+          }
+
+          const existingReceiverTeam = await db
+            .select({ id: teamTable.id })
+            .from(teamParticipantTable)
+            .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+            .where(
+              and(
+                eq(teamTable.eventId, eventInvite.eventId),
+                eq(teamParticipantTable.userId, user.id),
+              ),
+            )
+            .limit(1);
+
+          if (existingReceiverTeam.length > 0) {
+            return sendResponse({
+              success: false,
+              message: "You are already registered for this event.",
+            });
+          }
+
+          if (eventInvite.teamId) {
+            const team = eventInvite.team;
+            if (!team || team.eventId !== eventInvite.eventId || !team.event) {
+              return sendResponse({
+                success: false,
+                message: "Team does not belong to this event.",
+              });
+            }
+
+            if (!isDoublesTeamType(team.event.teamType)) {
+              return sendResponse({
+                success: false,
+                message: "Partner invites are only available for doubles teams.",
+              });
+            }
+
+            if ((team.teamStatus || "").toLowerCase() !== "created") {
+              return sendResponse({
+                success: false,
+                message: "This team is already registered.",
+              });
+            }
+
+            if ((team.participants || []).length >= 2) {
+              return sendResponse({
+                success: false,
+                message: "Doubles team already has 2 participants.",
+              });
+            }
+          }
         }
 
         await db.transaction(async (tx) => {
