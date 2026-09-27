@@ -22,15 +22,18 @@ function isRegistrationClosed(event: {
   dueDate: Date | string | null | undefined;
   eventState?: string | null;
 }) {
-  if (event.eventState === "registration_closed") return true;
-  if (!event.dueDate) return false;
-
   try {
-    const dueDate = getDateOnly(event.dueDate);
+    const dueDate = event.dueDate ? getDateOnly(event.dueDate) : null;
+    const today = getDateOnly(new Date());
+    if (event.eventState === "registration_closed") {
+      return !dueDate || dueDate.getTime() <= today.getTime();
+    }
+    if (!dueDate) return false;
+
     dueDate.setUTCHours(23, 59, 59, 999);
     return Date.now() > dueDate.getTime();
   } catch {
-    return false;
+    return event.eventState === "registration_closed";
   }
 }
 

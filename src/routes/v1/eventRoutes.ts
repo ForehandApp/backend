@@ -786,9 +786,18 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           });
         }
 
+        const today = getDateOnly(new Date());
+        const updateValues: Record<string, any> = { dueDate: newDueDate };
+        if (
+          event.eventState === "registration_closed" &&
+          newDueDate.getTime() >= today.getTime()
+        ) {
+          updateValues.eventState = "created";
+        }
+
         await db
           .update(eventTable)
-          .set({ dueDate: newDueDate })
+          .set(updateValues)
           .where(eq(eventTable.id, eventId));
 
         return sendResponse({
@@ -839,9 +848,14 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           });
         }
 
+        const updateValues: Record<string, any> = { eventState: body.state };
+        if (body.state === "registration_closed") {
+          updateValues.dueDate = getDateOnly(new Date());
+        }
+
         await db
           .update(eventTable)
-          .set({ eventState: body.state })
+          .set(updateValues)
           .where(eq(eventTable.id, eventId));
 
         return sendResponse({
