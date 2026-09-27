@@ -100,11 +100,20 @@ const baseApi = new Elysia()
   )
   .decorate("supabase", supabase)
   .decorate("db", db)
-  .onError(({ error, set }) => {
-    set.status = 500;
-
+  .onError(({ error, set, code }) => {
     const errorBody = error as any;
+    const configuredStatus = Number(
+      errorBody?.status ?? errorBody?.statusCode,
+    );
+    set.status =
+      Number.isInteger(configuredStatus) && configuredStatus >= 400
+        ? configuredStatus
+        : code === "VALIDATION"
+          ? 400
+          : 500;
+
     const message =
+      errorBody?.summary ||
       errorBody?.message ||
       (typeof errorBody?.toString === "function"
         ? errorBody.toString()
@@ -122,7 +131,14 @@ const baseApi = new Elysia()
     }
     return sendResponse({
       success: false,
-      message: typeof message === "string" ? message : "Internal Server Error",
+      message:
+        code === "VALIDATION"
+          ? typeof message === "string"
+            ? message
+            : "Invalid request payload"
+          : typeof message === "string"
+            ? message
+            : "Internal Server Error",
     });
   });
 

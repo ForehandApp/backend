@@ -20,7 +20,7 @@ import {
   teamTypesTable,
 } from "@/services/db/schema";
 import { inArray, eq, notInArray, or, and } from "drizzle-orm";
-import { formatDateOnly, getDate } from "@/utils/helpers";
+import { formatDateOnly, getDateOnly } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { canViewTournament } from "@/utils/access";
 import { t } from "elysia";
@@ -39,6 +39,134 @@ function isJoinedTeamStatus(status: unknown) {
 
 function isWaitingListTeamStatus(status: unknown) {
   return waitingListTeamStatuses.has(String(status || "").toLowerCase());
+}
+
+function hasText(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isPositiveInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function parseRequiredDateOnly(value: unknown, label: string) {
+  if (value instanceof Date) return getDateOnly(value);
+  if (!hasText(value)) {
+    throw new Error(`${label} is required`);
+  }
+  return getDateOnly(value as string);
+}
+
+function parseOptionalDateOnly(value: unknown, label: string) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  try {
+    return getDateOnly(value as string | Date);
+  } catch {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
+function getDateOnlyOrNull(value: unknown) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  try {
+    return getDateOnly(value as string | Date);
+  } catch {
+    return null;
+  }
+}
+
+function validateTournamentPublishRequirements(tournament: any, events: any[]) {
+  const issues: string[] = [];
+
+  const requiredTextFields: Array<[string, string]> = [
+    ["name", "Tournament name is required"],
+    ["description", "Tournament description is required"],
+    ["venueName", "Venue name is required"],
+    ["venueAddress", "Venue address is required"],
+    ["venueCity", "Venue city is required"],
+    ["venueState", "Venue state is required"],
+    ["venuePostalCode", "Venue postal code is required"],
+    ["contactName", "Contact name is required"],
+    ["contactEmail", "Contact email is required"],
+    ["contactPhone", "Contact phone is required"],
+  ];
+
+  for (const [field, message] of requiredTextFields) {
+    if (!hasText(tournament?.[field])) issues.push(message);
+  }
+
+  if (!isPositiveInteger(tournament?.venueCourts)) {
+    issues.push("At least one venue court is required");
+  }
+
+  const tournamentStart = getDateOnlyOrNull(tournament?.startDate);
+  const tournamentEnd = getDateOnlyOrNull(tournament?.endDate);
+  if (!tournamentStart) {
+    issues.push("Tournament start date is required");
+  }
+  if (tournament?.endDate && !tournamentEnd) {
+    issues.push("Tournament end date is invalid");
+  }
+  if (tournamentStart && tournamentEnd && tournamentEnd < tournamentStart) {
+    issues.push("Tournament end date cannot be before start date");
+  }
+
+  if (!Array.isArray(events) || events.length === 0) {
+    issues.push("At least one event is required");
+    return issues;
+  }
+
+  events.forEach((event, index) => {
+    const label = `Event ${index + 1}`;
+    if (!hasText(event?.name)) issues.push(`${label} name is required`);
+    if (!isPositiveInteger(event?.sportId)) issues.push(`${label} sport is required`);
+    if (!isPositiveInteger(event?.formatId)) issues.push(`${label} format is required`);
+    if (!isPositiveInteger(event?.teamTypeId)) {
+      issues.push(`${label} participation type is required`);
+    }
+    if (!isPositiveInteger(event?.pointsPerSet)) {
+      issues.push(`${label} points per set is required`);
+    }
+    if (!isPositiveInteger(event?.setsPerMatch)) {
+      issues.push(`${label} sets per match is required`);
+    }
+    if (typeof event?.amount !== "number" || event.amount < 0) {
+      issues.push(`${label} fee amount is invalid`);
+    }
+    if (event?.amount > 0 && !event?.paymentModeId) {
+      issues.push(`${label} payment mode is required for paid events`);
+    }
+
+    const dueDate = getDateOnlyOrNull(event?.dueDate);
+    const startDate = getDateOnlyOrNull(event?.startDate);
+    if (!dueDate) issues.push(`${label} registration due date is required`);
+    if (!startDate) issues.push(`${label} start date is required`);
+    if (dueDate && startDate && dueDate > startDate) {
+      issues.push(`${label} registration due date cannot be after start date`);
+    }
+    if (tournamentStart && startDate && startDate < tournamentStart) {
+      issues.push(`${label} cannot start before the tournament starts`);
+    }
+    if (tournamentEnd && startDate && startDate > tournamentEnd) {
+      issues.push(`${label} cannot start after the tournament ends`);
+    }
+    if (event?.playerBornAfter && !getDateOnlyOrNull(event.playerBornAfter)) {
+      issues.push(`${label} player age restriction date is invalid`);
+    }
+  });
+
+  return issues;
+}
+
+function getPublishBlockedMessage(issues: string[]) {
+  const visibleIssues = issues.slice(0, 5);
+  const suffix =
+    issues.length > visibleIssues.length
+      ? `, and ${issues.length - visibleIssues.length} more issue(s)`
+      : "";
+  return `Tournament cannot be published until all required details are complete: ${visibleIssues.join("; ")}${suffix}.`;
 }
 
 export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
@@ -301,12 +429,43 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         }
 
         const updateValues: Record<string, any> = {};
+        let parsedStartDate: Date | undefined;
+        let parsedEndDate: Date | null | undefined;
+        try {
+          if (body.startDate !== undefined) {
+            parsedStartDate = parseRequiredDateOnly(
+              body.startDate,
+              "Tournament start date",
+            );
+          }
+          if (body.endDate !== undefined) {
+            parsedEndDate = parseOptionalDateOnly(
+              body.endDate,
+              "Tournament end date",
+            );
+          }
+        } catch (error) {
+          return sendResponse({
+            success: false,
+            message:
+              error instanceof Error ? error.message : "Invalid tournament date",
+          });
+        }
+
+        const finalStartDate = parsedStartDate ?? tournament.startDate;
+        const finalEndDate =
+          parsedEndDate !== undefined ? parsedEndDate : tournament.endDate;
+        if (finalEndDate && getDateOnly(finalEndDate) < getDateOnly(finalStartDate)) {
+          return sendResponse({
+            success: false,
+            message: "Tournament end date cannot be before start date",
+          });
+        }
+
         if (body.name !== undefined) updateValues.name = body.name;
         if (body.description !== undefined) updateValues.description = body.description;
-        if (body.startDate !== undefined) updateValues.startDate = getDate(body.startDate);
-        if (body.endDate !== undefined) {
-          updateValues.endDate = body.endDate !== null ? getDate(body.endDate) : null;
-        }
+        if (parsedStartDate !== undefined) updateValues.startDate = parsedStartDate;
+        if (parsedEndDate !== undefined) updateValues.endDate = parsedEndDate;
         if (body.venueName !== undefined) updateValues.venueName = body.venueName;
         if (body.venueAddress !== undefined) updateValues.venueAddress = body.venueAddress;
         if (body.venueCity !== undefined) updateValues.venueCity = body.venueCity;
@@ -733,6 +892,21 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           });
         }
 
+        const events = await db
+          .select()
+          .from(eventTable)
+          .where(eq(eventTable.tournamentId, tournamentId));
+        const publishIssues = validateTournamentPublishRequirements(
+          tournament,
+          events,
+        );
+        if (publishIssues.length > 0) {
+          return sendResponse({
+            success: false,
+            message: getPublishBlockedMessage(publishIssues),
+          });
+        }
+
         await db
           .update(tournamentTable)
           .set({ tournamentState: "published" })
@@ -776,6 +950,23 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           });
         }
 
+        if (body.state === "published") {
+          const events = await db
+            .select()
+            .from(eventTable)
+            .where(eq(eventTable.tournamentId, tournamentId));
+          const publishIssues = validateTournamentPublishRequirements(
+            tournament,
+            events,
+          );
+          if (publishIssues.length > 0) {
+            return sendResponse({
+              success: false,
+              message: getPublishBlockedMessage(publishIssues),
+            });
+          }
+        }
+
         await db
           .update(tournamentTable)
           .set({ tournamentState: body.state })
@@ -787,7 +978,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         });
       },
       {
-        params: t.Object({ tournamentId: t.String() }),
+        params: t.Object({ tournamentId: t.String({ format: "uuid" }) }),
         body: t.Object({
           state: t.Union([
             t.Literal("drafted"),
@@ -1033,14 +1224,37 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
             message: "You are not eligible to create this tournament",
           });
 
+        let startDate: Date;
+        let endDate: Date | null;
+        try {
+          startDate = parseRequiredDateOnly(
+            body.startDate,
+            "Tournament start date",
+          );
+          endDate = parseOptionalDateOnly(body.endDate, "Tournament end date");
+        } catch (error) {
+          return sendResponse({
+            success: false,
+            message:
+              error instanceof Error ? error.message : "Invalid tournament date",
+          });
+        }
+
+        if (endDate && endDate < startDate) {
+          return sendResponse({
+            success: false,
+            message: "Tournament end date cannot be before start date",
+          });
+        }
+
         const tournamentInsert = await db
           .insert(tournamentTable)
           .values({
             organizationId: body.organizationId,
             name: body.name,
             description: body.description,
-            startDate: getDate(body.startDate),
-            endDate: body.endDate !== undefined ? getDate(body.endDate) : null,
+            startDate,
+            endDate,
 
             venueName: body.venueName,
             venueAddress: body.venueAddress,
@@ -1070,7 +1284,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           name: t.String(),
           description: t.String(),
           startDate: t.String(),
-          endDate: t.Optional(t.String()),
+          endDate: t.Optional(t.Nullable(t.String())),
 
           venueName: t.String(),
           venueAddress: t.String(),
