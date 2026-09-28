@@ -82,7 +82,6 @@ function validateTournamentPublishRequirements(tournament: any, events: any[]) {
 
   const requiredTextFields: Array<[string, string]> = [
     ["name", "Tournament name is required"],
-    ["description", "Tournament description is required"],
     ["venueName", "Venue name is required"],
     ["venueAddress", "Venue address is required"],
     ["venueCity", "Venue city is required"],
@@ -1266,7 +1265,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           .values({
             organizationId: body.organizationId,
             name: body.name,
-            description: body.description,
+            description: body.description ?? "",
             startDate,
             endDate,
 
@@ -1296,7 +1295,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
         body: t.Object({
           organizationId: t.String({ format: "uuid" }),
           name: t.String(),
-          description: t.String(),
+          description: t.Optional(t.String()),
           startDate: t.String(),
           endDate: t.Optional(t.Nullable(t.String())),
 
