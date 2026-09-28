@@ -32,6 +32,7 @@ function sanitizeTournamentTree(tournament: any) {
 
 const joinedTeamStatuses = new Set(["participating", "eliminated", "confirmed"]);
 const waitingListTeamStatuses = new Set(["registered", "waiting", "waitlist"]);
+const publiclyVisibleTournamentStates = ["published", "in_progress"];
 
 function isJoinedTeamStatus(status: unknown) {
   return joinedTeamStatuses.has(String(status || "").toLowerCase());
@@ -39,6 +40,28 @@ function isJoinedTeamStatus(status: unknown) {
 
 function isWaitingListTeamStatus(status: unknown) {
   return waitingListTeamStatuses.has(String(status || "").toLowerCase());
+}
+
+function getUserTournamentTimelineBucket(tournament: any, now = new Date()) {
+  const state = String(tournament?.tournamentState || "").toLowerCase();
+
+  if (state === "drafted") return "hidden";
+  if (state === "completed" || state === "cancelled") return "history";
+
+  const today = getDateOnly(now).getTime();
+  const endDate = getDateOnlyOrNull(tournament?.endDate);
+
+  if (endDate && endDate.getTime() < today) return "history";
+
+  return "active";
+}
+
+function isUserTournamentActive(tournament: any) {
+  return getUserTournamentTimelineBucket(tournament) === "active";
+}
+
+function isUserTournamentHistory(tournament: any) {
+  return getUserTournamentTimelineBucket(tournament) === "history";
 }
 
 function hasText(value: unknown) {
@@ -1406,7 +1429,11 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               );
 
               const browseTournaments = await db.query.tournamentTable.findMany({
-                where: { tournamentState: "published" },
+                where: ((table: any, { inArray }: any) =>
+                  inArray(
+                    table.tournamentState,
+                    publiclyVisibleTournamentStates,
+                  )) as any,
                 with: {
                   events: {
                     with: {
@@ -1426,6 +1453,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               const browse = browseTournaments
                 .filter((t) => {
                   if (joinedTournamentIdSet.has(t.id)) return false;
+                  if (!isUserTournamentActive(t)) return false;
 
                   return t.events.some(
                     (event: any) =>
@@ -1461,11 +1489,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 });
 
                 joined = (joinedTournaments as any[])
-                  .filter(
-                    (t) =>
-                      t.tournamentState === "published" ||
-                      t.tournamentState === "in_progress",
-                  )
+                  .filter(isUserTournamentActive)
                   .map((t) => ({
                     ...t,
                     events: t.events.filter((e: any) =>
@@ -1524,7 +1548,11 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               );
 
               const tournaments = await db.query.tournamentTable.findMany({
-                where: { tournamentState: "published" },
+                where: ((table: any, { inArray }: any) =>
+                  inArray(
+                    table.tournamentState,
+                    publiclyVisibleTournamentStates,
+                  )) as any,
                 with: {
                   events: {
                     with: {
@@ -1544,6 +1572,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               const filtered = tournaments
                 .filter((t) => {
                   if (joinedTournamentIds.has(t.id)) return false;
+                  if (!isUserTournamentActive(t)) return false;
 
                   // Check if any event is eligible for the user's gender
                   return t.events.some(
@@ -1617,11 +1646,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               });
 
               const filtered = (tournaments as any[])
-                .filter(
-                  (t) =>
-                    t.tournamentState === "published" ||
-                    t.tournamentState === "in_progress",
-                )
+                .filter(isUserTournamentActive)
                 .map((t) => ({
                   ...t,
                   events: t.events.filter((e: any) => joinedEventIds.has(e.id)),
@@ -1669,7 +1694,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               }
 
               const tournaments = await db.query.tournamentTable.findMany({
-                where: { tournamentState: "completed" },
+                where: ((table: any, { inArray }: any) =>
+                  inArray(table.id, joinedTournamentIds)) as any,
                 with: {
                   events: {
                     with: {
@@ -1687,7 +1713,7 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
               });
 
               const filtered = (tournaments as any[])
-                .filter((t) => joinedTournamentIds.includes(t.id))
+                .filter(isUserTournamentHistory)
                 .map((t) => ({
                   ...t,
                   events: t.events.filter((e: any) => joinedEventIds.has(e.id)),
