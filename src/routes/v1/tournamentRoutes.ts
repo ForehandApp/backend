@@ -885,6 +885,13 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           });
         }
 
+        if (tournament.tournamentState === "published") {
+          return sendResponse({
+            success: true,
+            message: "Tournament already published",
+          });
+        }
+
         if (tournament.tournamentState !== "drafted") {
           return sendResponse({
             success: false,
@@ -947,6 +954,13 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
           return sendResponse({
             success: false,
             message: "You are not eligible to update this tournament state",
+          });
+        }
+
+        if (tournament.tournamentState === body.state) {
+          return sendResponse({
+            success: true,
+            message: `Tournament state is already ${body.state}`,
           });
         }
 

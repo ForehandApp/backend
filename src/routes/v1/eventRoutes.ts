@@ -848,6 +848,13 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           });
         }
 
+        if (event.eventState === body.state) {
+          return sendResponse({
+            success: true,
+            message: `Event state is already ${body.state}`,
+          });
+        }
+
         const updateValues: Record<string, any> = { eventState: body.state };
         if (body.state === "registration_closed") {
           updateValues.dueDate = getDateOnly(new Date());
@@ -1239,6 +1246,21 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
+          if (
+            [
+              "participants_finalized",
+              "scheduled",
+              "in_progress",
+              "round_over",
+              "completed",
+            ].includes(event.eventState || "")
+          ) {
+            return sendResponse({
+              success: true,
+              message: "Participants already finalized",
+            });
+          }
+
           await db.transaction(async (tx) => {
             // Update event state and active round
             await tx
@@ -1311,12 +1333,31 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
             });
           }
 
+          if (
+            event.eventState &&
+            !["created", "registration_closed", "participants_finalized"].includes(
+              event.eventState,
+            )
+          ) {
+            return sendResponse({
+              success: true,
+              message: "Schedule already finalized",
+            });
+          }
+
           await db.transaction(async (tx) => {
-            // Update event state
-            await tx
+            const updatedEvents = await tx
               .update(eventTable)
               .set({ eventState: "scheduled" })
-              .where(eq(eventTable.id, eventId));
+              .where(
+                and(
+                  eq(eventTable.id, eventId),
+                  eq(eventTable.eventState, event.eventState),
+                ),
+              )
+              .returning({ id: eventTable.id });
+
+            if (updatedEvents.length === 0) return;
 
             // Create matches
             for (const match of body.matches) {
