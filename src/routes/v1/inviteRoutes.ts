@@ -14,7 +14,7 @@ import {
   tournamentVolunteerTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { getDateOnly } from "@/utils/helpers";
+import { getAppDateOnly, getAppDateOnlyEndTime } from "@/utils/helpers";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { t } from "elysia";
@@ -35,15 +35,14 @@ function isEventRegistrationClosed(event: {
   eventState?: string | null;
 }) {
   try {
-    const dueDate = event.dueDate ? getDateOnly(event.dueDate) : null;
-    const today = getDateOnly(new Date());
+    const dueDate = event.dueDate ? getAppDateOnly(event.dueDate) : null;
+    const today = getAppDateOnly(new Date());
     if (event.eventState === "registration_closed") {
       return !dueDate || dueDate.getTime() <= today.getTime();
     }
     if (!dueDate) return false;
 
-    dueDate.setUTCHours(23, 59, 59, 999);
-    return Date.now() > dueDate.getTime();
+    return Date.now() > getAppDateOnlyEndTime(event.dueDate!);
   } catch {
     return event.eventState === "registration_closed";
   }

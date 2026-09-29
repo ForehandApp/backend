@@ -73,3 +73,48 @@ export function formatDateOnly(value: string | Date): string {
 export function getDateOnlyTime(value: string | Date): number {
   return getDateOnly(value).getTime();
 }
+
+const APP_TIMEZONE_OFFSET_MINUTES = 330;
+const APP_TIMEZONE_OFFSET_MS = APP_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
+
+function getAppDateOnlyParts(value: string | Date): {
+  year: number;
+  month: number;
+  day: number;
+} {
+  if (typeof value === "string") {
+    const slashMatch = value.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slashMatch) {
+      return {
+        year: Number(slashMatch[3]),
+        month: Number(slashMatch[2]),
+        day: Number(slashMatch[1]),
+      };
+    }
+  }
+
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Invalid date");
+  }
+
+  const appTime = new Date(parsed.getTime() + APP_TIMEZONE_OFFSET_MS);
+  return {
+    year: appTime.getUTCFullYear(),
+    month: appTime.getUTCMonth() + 1,
+    day: appTime.getUTCDate(),
+  };
+}
+
+export function getAppDateOnly(value: string | Date): Date {
+  const { year, month, day } = getAppDateOnlyParts(value);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+export function getAppDateOnlyEndTime(value: string | Date): number {
+  const { year, month, day } = getAppDateOnlyParts(value);
+  return (
+    Date.UTC(year, month - 1, day, 23, 59, 59, 999) -
+    APP_TIMEZONE_OFFSET_MS
+  );
+}

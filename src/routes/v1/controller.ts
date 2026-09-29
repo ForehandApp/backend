@@ -110,6 +110,8 @@ const baseApi = new Elysia()
         ? configuredStatus
         : code === "VALIDATION"
           ? 400
+          : code === "NOT_FOUND"
+            ? 404
           : 500;
 
     const message =
@@ -136,6 +138,8 @@ const baseApi = new Elysia()
           ? typeof message === "string"
             ? message
             : "Invalid request payload"
+          : code === "NOT_FOUND"
+            ? "Route not found"
           : typeof message === "string"
             ? message
             : "Internal Server Error",

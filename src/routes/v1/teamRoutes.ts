@@ -6,6 +6,8 @@ import {
   teamActionLogsTable,
   teamParticipantTable,
   teamTable,
+  teamTypesTable,
+  tournamentTable,
 } from "@/services/db/schema";
 import {
   canViewEvent,
@@ -13,7 +15,7 @@ import {
   isTournamentManager,
   publicProfileColumns,
 } from "@/utils/access";
-import { getDateOnly } from "@/utils/helpers";
+import { getAppDateOnly, getAppDateOnlyEndTime } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { eq, and, inArray, or } from "drizzle-orm";
 import { t } from "elysia";
@@ -23,15 +25,14 @@ function isRegistrationClosed(event: {
   eventState?: string | null;
 }) {
   try {
-    const dueDate = event.dueDate ? getDateOnly(event.dueDate) : null;
-    const today = getDateOnly(new Date());
+    const dueDate = event.dueDate ? getAppDateOnly(event.dueDate) : null;
+    const today = getAppDateOnly(new Date());
     if (event.eventState === "registration_closed") {
       return !dueDate || dueDate.getTime() <= today.getTime();
     }
     if (!dueDate) return false;
 
-    dueDate.setUTCHours(23, 59, 59, 999);
-    return Date.now() > dueDate.getTime();
+    return Date.now() > getAppDateOnlyEndTime(event.dueDate!);
   } catch {
     return event.eventState === "registration_closed";
   }
@@ -61,14 +62,31 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
       "/create",
       async ({ user, db, body }) => {
         try {
-          const event = await db.query.eventTable.findFirst({
-            where: ((table: any, { eq }: any) =>
-              eq(table.id, body.eventId)) as any,
-            with: {
-              teamType: true,
-              tournament: true,
-            },
-          });
+          const eventRows = await db
+            .select({
+              event: eventTable,
+              teamType: teamTypesTable,
+              tournament: tournamentTable,
+            })
+            .from(eventTable)
+            .innerJoin(
+              teamTypesTable,
+              eq(eventTable.teamTypeId, teamTypesTable.id),
+            )
+            .innerJoin(
+              tournamentTable,
+              eq(eventTable.tournamentId, tournamentTable.id),
+            )
+            .where(eq(eventTable.id, body.eventId))
+            .limit(1);
+          const eventRow = eventRows[0];
+          const event = eventRow
+            ? {
+                ...eventRow.event,
+                teamType: eventRow.teamType,
+                tournament: eventRow.tournament,
+              }
+            : null;
 
           if (!event || !event.teamType) {
             return sendResponse({
@@ -702,47 +720,54 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
     .get(
       "/my-team/:eventId",
       async ({ db, user, params: { eventId } }) => {
-        const result = await db
-          .select()
-          .from(teamParticipantTable)
-          .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
-          .where(
-            and(
-              eq(teamParticipantTable.userId, user.id),
-              eq(teamTable.eventId, eventId),
-            ),
-          )
-          .limit(1);
+        try {
+          const result = await db
+            .select()
+            .from(teamParticipantTable)
+            .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
+            .where(
+              and(
+                eq(teamParticipantTable.userId, user.id),
+                eq(teamTable.eventId, eventId),
+              ),
+            )
+            .limit(1);
 
-        if (result.length === 0 || !result[0]) {
-          return sendResponse({
-            success: true,
-            message: "User is not in any team for this event",
-            data: null,
-          });
-        }
+          if (result.length === 0 || !result[0]) {
+            return sendResponse({
+              success: true,
+              message: "User is not in any team for this event",
+              data: null,
+            });
+          }
 
-        const teamId = result[0].team_participant_table.teamId;
+          const teamId = result[0].team_participant_table.teamId;
 
-        const fullTeam = await db.query.teamTable.findFirst({
-          where: { id: teamId },
-          with: {
-            participants: {
-              with: {
-                user: {
-                  columns: publicProfileColumns,
+          const fullTeam = await db.query.teamTable.findFirst({
+            where: ((table: any, { eq }: any) => eq(table.id, teamId)) as any,
+            with: {
+              participants: {
+                with: {
+                  user: {
+                    columns: publicProfileColumns,
+                  },
                 },
               },
+              teamType: true,
             },
-            teamType: true,
-          },
-        });
+          });
 
-        return sendResponse({
-          success: true,
-          message: "My team fetched successfully",
-          data: fullTeam,
-        });
+          return sendResponse({
+            success: true,
+            message: "My team fetched successfully",
+            data: fullTeam,
+          });
+        } catch {
+          return sendResponse({
+            success: false,
+            message: "Failed to fetch team registration state",
+          });
+        }
       },
       {
         params: t.Object({ eventId: t.String({ format: "uuid" }) }),
