@@ -3,6 +3,7 @@ import {
   eventTable,
   matchTable,
   organizationMemberTable,
+  profileTable,
   teamActionLogsTable,
   teamParticipantTable,
   teamTable,
@@ -743,19 +744,45 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
 
           const teamId = result[0].team_participant_table.teamId;
 
-          const fullTeam = await db.query.teamTable.findFirst({
-            where: ((table: any, { eq }: any) => eq(table.id, teamId)) as any,
-            with: {
-              participants: {
-                with: {
-                  user: {
-                    columns: publicProfileColumns,
-                  },
-                },
+          const teamRows = await db
+            .select({
+              team: teamTable,
+              teamType: teamTypesTable,
+            })
+            .from(teamTable)
+            .leftJoin(
+              teamTypesTable,
+              eq(teamTable.teamTypeId, teamTypesTable.id),
+            )
+            .where(eq(teamTable.id, teamId))
+            .limit(1);
+
+          const participantRows = await db
+            .select({
+              userId: teamParticipantTable.userId,
+              teamId: teamParticipantTable.teamId,
+              user: {
+                id: profileTable.id,
+                name: profileTable.name,
+                profilePicUrl: profileTable.profilePicUrl,
               },
-              teamType: true,
-            },
-          });
+            })
+            .from(teamParticipantTable)
+            .innerJoin(
+              profileTable,
+              eq(teamParticipantTable.userId, profileTable.id),
+            )
+            .where(eq(teamParticipantTable.teamId, teamId));
+
+          const teamRow = teamRows[0];
+          const fullTeam = teamRow
+            ? {
+                ...teamRow.team,
+                teamType: teamRow.teamType,
+                teamTypeCode: teamRow.teamType?.code ?? null,
+                participants: participantRows,
+              }
+            : null;
 
           return sendResponse({
             success: true,
@@ -783,24 +810,49 @@ export const teamRoutes = protectedApi.group("/team", (app) =>
           });
         }
 
-        const team = await db.query.teamTable.findFirst({
-          where: { id: teamId },
-          with: {
-            participants: {
-              with: {
-                user: {
-                  columns: publicProfileColumns,
-                },
-              },
+        const teamRows = await db
+          .select({
+            team: teamTable,
+            teamType: teamTypesTable,
+            event: eventTable,
+            tournament: tournamentTable,
+          })
+          .from(teamTable)
+          .leftJoin(teamTypesTable, eq(teamTable.teamTypeId, teamTypesTable.id))
+          .leftJoin(eventTable, eq(teamTable.eventId, eventTable.id))
+          .leftJoin(tournamentTable, eq(eventTable.tournamentId, tournamentTable.id))
+          .where(eq(teamTable.id, teamId))
+          .limit(1);
+
+        const participantRows = await db
+          .select({
+            userId: teamParticipantTable.userId,
+            teamId: teamParticipantTable.teamId,
+            user: {
+              id: profileTable.id,
+              name: profileTable.name,
+              profilePicUrl: profileTable.profilePicUrl,
             },
-            teamType: true,
-            event: {
-              with: {
-                tournament: true,
-              },
-            },
-          },
-        });
+          })
+          .from(teamParticipantTable)
+          .innerJoin(profileTable, eq(teamParticipantTable.userId, profileTable.id))
+          .where(eq(teamParticipantTable.teamId, teamId));
+
+        const teamRow = teamRows[0];
+        const team = teamRow
+          ? {
+              ...teamRow.team,
+              participants: participantRows,
+              teamType: teamRow.teamType,
+              teamTypeCode: teamRow.teamType?.code ?? null,
+              event: teamRow.event
+                ? {
+                    ...teamRow.event,
+                    tournament: teamRow.tournament,
+                  }
+                : null,
+            }
+          : null;
 
         if (!team) {
           return sendResponse({
