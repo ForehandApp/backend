@@ -32,6 +32,7 @@ function sanitizeTournamentTree(tournament: any) {
 
 const joinedTeamStatuses = new Set(["participating", "eliminated", "confirmed"]);
 const waitingListTeamStatuses = new Set(["registered", "waiting", "waitlist"]);
+const rejectedTeamStatuses = new Set(["rejected"]);
 const publiclyVisibleTournamentStates = ["published", "in_progress"];
 
 function isJoinedTeamStatus(status: unknown) {
@@ -40,6 +41,10 @@ function isJoinedTeamStatus(status: unknown) {
 
 function isWaitingListTeamStatus(status: unknown) {
   return waitingListTeamStatuses.has(String(status || "").toLowerCase());
+}
+
+function isRejectedTeamStatus(status: unknown) {
+  return rejectedTeamStatuses.has(String(status || "").toLowerCase());
 }
 
 function getUserTournamentTimelineBucket(tournament: any, now = new Date()) {
@@ -1418,6 +1423,11 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   .filter((row) => isWaitingListTeamStatus(row.teamStatus))
                   .map((row) => row.tournamentId),
               );
+              const rejectedTournamentIds = new Set(
+                joinedTournamentsQuery
+                  .filter((row) => isRejectedTeamStatus(row.teamStatus))
+                  .map((row) => row.tournamentId),
+              );
               const joinedTournamentIds = [
                 ...new Set(
                   confirmedJoinedRows.map((row) => row.tournamentId),
@@ -1464,6 +1474,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .map((t) =>
                   waitingListTournamentIds.has(t.id)
                     ? { ...t, userRegistrationStatus: "waiting_list" }
+                    : rejectedTournamentIds.has(t.id)
+                      ? { ...t, userRegistrationStatus: "rejected" }
                     : t,
                 );
 
@@ -1546,6 +1558,11 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                   .filter((r) => isWaitingListTeamStatus(r.teamStatus))
                   .map((r) => r.id),
               );
+              const rejectedTournamentIds = new Set(
+                joinedTournamentsQuery
+                  .filter((r) => isRejectedTeamStatus(r.teamStatus))
+                  .map((r) => r.id),
+              );
 
               const tournaments = await db.query.tournamentTable.findMany({
                 where: ((table: any, { inArray }: any) =>
@@ -1583,6 +1600,8 @@ export const tournamentRoutes = protectedApi.group("/tournament", (app) =>
                 .map((t) =>
                   waitingListTournamentIds.has(t.id)
                     ? { ...t, userRegistrationStatus: "waiting_list" }
+                    : rejectedTournamentIds.has(t.id)
+                      ? { ...t, userRegistrationStatus: "rejected" }
                     : t,
                 );
 
