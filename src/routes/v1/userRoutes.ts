@@ -20,7 +20,10 @@ import {
 import { getDate } from "@/utils/helpers";
 import { sendResponse } from "@/utils/response";
 import { eq, and, ne, desc, asc, or, inArray, notInArray, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { t } from "elysia";
+
+const inviteReceiverProfile = alias(profileTable, "invite_receiver_profile");
 
 function getDateOnly(date: string) {
   const parsed = new Date(date);
@@ -1239,7 +1242,47 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           )
           .orderBy(desc(invitesTable.updatedAt));
 
-        const data = rows.map((row) => ({
+        const acceptedSentEventRows = await db
+          .select({
+            id: invitesTable.id,
+            inviteState: invitesTable.inviteState,
+            createdAt: invitesTable.createdAt,
+            updatedAt: invitesTable.updatedAt,
+            receiverName: inviteReceiverProfile.name,
+            eventId: eventInvitesTable.eventId,
+            tournamentId: eventTable.tournamentId,
+            eventName: eventTable.name,
+            tournamentName: tournamentTable.name,
+          })
+          .from(invitesTable)
+          .innerJoin(
+            inviteReceiverProfile,
+            eq(invitesTable.receiverId, inviteReceiverProfile.id),
+          )
+          .innerJoin(
+            inviteTypeTable,
+            eq(invitesTable.invteTypeId, inviteTypeTable.id),
+          )
+          .innerJoin(
+            eventInvitesTable,
+            eq(invitesTable.id, eventInvitesTable.inviteId),
+          )
+          .innerJoin(eventTable, eq(eventInvitesTable.eventId, eventTable.id))
+          .leftJoin(
+            tournamentTable,
+            eq(eventTable.tournamentId, tournamentTable.id),
+          )
+          .where(
+            and(
+              eq(invitesTable.senderId, user.id),
+              eq(inviteTypeTable.code, "event"),
+              eq(invitesTable.inviteState, "accepted"),
+              sql`${invitesTable.updatedAt} >= now() - interval '3 days'`,
+            ),
+          )
+          .orderBy(desc(invitesTable.updatedAt));
+
+        const receiverNotifications = rows.map((row) => ({
           id: row.id,
           inviteId: row.id,
           type: "invite",
@@ -1272,6 +1315,27 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           updatedAt: row.updatedAt,
           unread: row.inviteState === "pending",
         }));
+
+        const senderNotifications = acceptedSentEventRows.map((row) => ({
+          id: `${row.id}:partner-accepted`,
+          inviteId: row.id,
+          type: "registration",
+          contextType: "event",
+          eventId: row.eventId,
+          tournamentId: row.tournamentId,
+          title: "Partner Accepted",
+          body: `${row.receiverName} accepted your duo invitation.`,
+          source: row.eventName || row.tournamentName || "",
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          unread: true,
+        }));
+
+        const data = [...receiverNotifications, ...senderNotifications].sort(
+          (a, b) =>
+            new Date(b.updatedAt || b.createdAt).getTime() -
+            new Date(a.updatedAt || a.createdAt).getTime(),
+        );
 
         return sendResponse({
           success: true,
