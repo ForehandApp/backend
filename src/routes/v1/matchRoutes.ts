@@ -13,6 +13,7 @@ import {
   canViewEvent,
   canViewMatch,
   canViewSet,
+  isTournamentManager,
   publicProfileColumns,
 } from "@/utils/access";
 import { eq, and, inArray, notInArray, ne, sql } from "drizzle-orm";
@@ -62,6 +63,10 @@ function normalizeSetRows(sets: any[] = []) {
   return [...byNumber.values()].sort(
     (a: any, b: any) => a.setNumber - b.setNumber,
   );
+}
+
+function uniqueIds(values: Array<string | null | undefined>) {
+  return [...new Set(values.filter(Boolean) as string[])];
 }
 
 async function lockMatchSet(tx: any, matchId: string, setNumber: number) {
@@ -284,7 +289,13 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     .post(
       "/update-score",
       async ({ user, db, body, server }: any) => {
+        const logPrefix = "[MatchSubmitDebug]";
         try {
+          console.info(`${logPrefix} backend-update-score-start`, {
+            userId: user.id,
+            body,
+          });
+
           const match = await db.query.matchTable.findFirst({
             where: ((table: any, { eq }: any) =>
               eq(table.id, body.matchId)) as any,
@@ -298,6 +309,10 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
 
           if (!match) {
+            console.warn(`${logPrefix} backend-update-score-match-missing`, {
+              userId: user.id,
+              matchId: body.matchId,
+            });
             return sendResponse({
               success: false,
               message: `Match not found for ID: ${body.matchId}`,
@@ -305,6 +320,12 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           }
 
           if (!match.event || !match.event.tournament) {
+            console.warn(`${logPrefix} backend-update-score-tournament-missing`, {
+              userId: user.id,
+              matchId: body.matchId,
+              hasEvent: Boolean(match.event),
+              hasTournament: Boolean(match.event?.tournament),
+            });
             return sendResponse({
               success: false,
               message: "Related event or tournament not found for this match",
@@ -323,7 +344,24 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               )) as any,
           });
 
-          if (!isScorer && !member) {
+          const isManager = await isTournamentManager(
+            db,
+            user.id,
+            match.event.tournament,
+          );
+
+          console.info(`${logPrefix} backend-update-score-auth`, {
+            userId: user.id,
+            matchId: body.matchId,
+            tournamentId: match.event.tournament.id,
+            organizationId: match.event.tournament.organizationId,
+            scorerId: match.scorer,
+            isScorer,
+            isOrgMember: Boolean(member),
+            isManager,
+          });
+
+          if (!isScorer && !member && !isManager) {
             return sendResponse({
               success: false,
               message: "You are not authorized to update scores for this match",
@@ -334,6 +372,15 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           const matchWinnerId = nullableUuid(body.matchWinnerId);
 
           await db.transaction(async (tx: any) => {
+            console.info(`${logPrefix} backend-update-score-transaction-start`, {
+              matchId: body.matchId,
+              setNumber: body.setNumber,
+              setWinnerId,
+              matchWinnerId,
+              currentMatchState: match.matchState,
+              currentEventState: match.event?.eventState,
+            });
+
             await lockMatchSet(tx, body.matchId, body.setNumber);
 
             const existingSet = await tx
@@ -348,6 +395,15 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               .limit(1);
 
             if (existingSet[0]?.id) {
+              console.info(`${logPrefix} backend-update-score-set-update`, {
+                matchId: body.matchId,
+                setNumber: body.setNumber,
+                setId: existingSet[0].id,
+                teamAScore: body.teamAScore,
+                teamBScore: body.teamBScore,
+                setStatus: body.setStatus,
+                winnerId: setWinnerId,
+              });
               await tx
                 .update(setTable)
                 .set({
@@ -363,6 +419,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   ),
                 );
             } else {
+              console.info(`${logPrefix} backend-update-score-set-insert`, {
+                matchId: body.matchId,
+                setNumber: body.setNumber,
+                teamAScore: body.teamAScore,
+                teamBScore: body.teamBScore,
+                setStatus: body.setStatus,
+                winnerId: setWinnerId,
+              });
               await tx.insert(setTable).values({
                 matchId: body.matchId,
                 setNumber: body.setNumber,
@@ -379,6 +443,11 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                 body.teamAScore > 0 ||
                 body.teamBScore > 0)
             ) {
+              console.info(`${logPrefix} backend-update-score-match-started`, {
+                matchId: body.matchId,
+                previousMatchState: match.matchState,
+                previousEventState: match.event.eventState,
+              });
               await tx
                 .update(matchTable)
                 .set({ matchState: "in_progress" })
@@ -396,6 +465,13 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             if (body.matchFinished && matchWinnerId) {
               const loserId =
                 matchWinnerId === match.teamA ? match.teamB : match.teamA;
+
+              console.info(`${logPrefix} backend-update-score-match-finish`, {
+                matchId: body.matchId,
+                matchWinnerId,
+                loserId,
+                roundNumber: match.roundNumber,
+              });
 
               // 1. Update match state and winner
               await tx
@@ -441,8 +517,21 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                     ),
                   );
 
-                if (totalMatchesInRound.length === 1) {
-                  // It was the final!
+                const advancingTeamIds = uniqueIds(
+                  totalMatchesInRound.map((roundMatch: any) =>
+                    roundMatch.id === body.matchId
+                      ? matchWinnerId
+                      : roundMatch.winnerId,
+                  ),
+                );
+
+                if (advancingTeamIds.length < 2) {
+                  // Only one team remains, so the event has a champion.
+                  console.info(`${logPrefix} backend-update-score-event-completed`, {
+                    eventId: match.event!.id,
+                    matchId: body.matchId,
+                    advancingTeamIds,
+                  });
                   await tx
                     .update(eventTable)
                     .set({
@@ -450,6 +539,13 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                     })
                     .where(eq(eventTable.id, match.event!.id));
                 } else {
+                  console.info(`${logPrefix} backend-update-score-round-over`, {
+                    eventId: match.event!.id,
+                    matchId: body.matchId,
+                    nextRound: match.roundNumber + 1,
+                    totalMatchesInRound: totalMatchesInRound.length,
+                    advancingTeamIds,
+                  });
                   await tx
                     .update(eventTable)
                     .set({
@@ -486,12 +582,25 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             JSON.stringify(broadcastData),
           );
 
+          console.info(`${logPrefix} backend-update-score-success`, {
+            userId: user.id,
+            matchId: body.matchId,
+            setNumber: body.setNumber,
+            matchFinished: body.matchFinished,
+            matchWinnerId,
+          });
+
           return sendResponse({
             success: true,
             message: "Score updated successfully",
           });
         } catch (error: any) {
-          console.error("[match/update-score] failed:", error);
+          console.error(`${logPrefix} backend-update-score-failed`, {
+            userId: user.id,
+            body,
+            error: error?.message || String(error),
+            stack: error?.stack,
+          });
           return sendResponse({
             success: false,
             message: error.message || "Failed to update score",
@@ -691,18 +800,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [member] = await db
-          .select()
-          .from(organizationMemberTable)
-          .where(
-            and(
-              eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
-              eq(organizationMemberTable.userId, user.id),
-            ),
-          )
-          .limit(1);
-
-        if (!member) {
+        if (!(await isTournamentManager(db, user.id, match.event.tournament))) {
           return sendResponse({
             success: false,
             message: "You are not authorized to manage scorers for this match",
@@ -786,21 +884,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [member] = await db
-          .select()
-          .from(organizationMemberTable)
-          .where(
-            and(
-              eq(
-                organizationMemberTable.organizationId,
-                match.event.tournament.organizationId,
-              ),
-              eq(organizationMemberTable.userId, user.id),
-            ),
-          )
-          .limit(1);
-
-        if (!member) {
+        if (!(await isTournamentManager(db, user.id, match.event.tournament))) {
           return sendResponse({
             success: false,
             message: "You are not authorized to manage courts for this match",
@@ -887,21 +971,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [member] = await db
-          .select()
-          .from(organizationMemberTable)
-          .where(
-            and(
-              eq(
-                organizationMemberTable.organizationId,
-                match.event.tournament.organizationId,
-              ),
-              eq(organizationMemberTable.userId, user.id),
-            ),
-          )
-          .limit(1);
-
-        if (!member) {
+        if (!(await isTournamentManager(db, user.id, match.event.tournament))) {
           return sendResponse({
             success: false,
             message: "You are not authorized to manage courts for this match",
@@ -988,21 +1058,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [member] = await db
-          .select()
-          .from(organizationMemberTable)
-          .where(
-            and(
-              eq(
-                organizationMemberTable.organizationId,
-                match.event.tournament.organizationId,
-              ),
-              eq(organizationMemberTable.userId, user.id),
-            ),
-          )
-          .limit(1);
-
-        if (!member) {
+        if (!(await isTournamentManager(db, user.id, match.event.tournament))) {
           return sendResponse({
             success: false,
             message: "You are not authorized to assign courts for this match",
@@ -1119,18 +1175,7 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
         }
 
-        const [member] = await db
-          .select()
-          .from(organizationMemberTable)
-          .where(
-            and(
-              eq(organizationMemberTable.organizationId, match.event!.tournament!.organizationId),
-              eq(organizationMemberTable.userId, user.id),
-            ),
-          )
-          .limit(1);
-
-        if (!member) {
+        if (!(await isTournamentManager(db, user.id, match.event.tournament))) {
           return sendResponse({
             success: false,
             message: "You are not authorized to assign scorers for this match",
@@ -1525,7 +1570,14 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
     .post(
       "/complete/:matchId",
       async ({ db, user, body, params: { matchId }, server }: any) => {
+        const logPrefix = "[MatchSubmitDebug]";
         try {
+          console.info(`${logPrefix} backend-complete-start`, {
+            userId: user.id,
+            matchId,
+            body,
+          });
+
           const match = await db.query.matchTable.findFirst({
             where: { id: matchId },
             with: {
@@ -1538,6 +1590,13 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
           });
 
           if (!match || !match.event || !match.event.tournament) {
+            console.warn(`${logPrefix} backend-complete-match-missing`, {
+              userId: user.id,
+              matchId,
+              hasMatch: Boolean(match),
+              hasEvent: Boolean(match?.event),
+              hasTournament: Boolean(match?.event?.tournament),
+            });
             return sendResponse({
               success: false,
               message: "Match or related tournament not found",
@@ -1556,7 +1615,24 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
               )) as any,
           });
 
-          if (!isScorer && !member) {
+          const isManager = await isTournamentManager(
+            db,
+            user.id,
+            match.event.tournament,
+          );
+
+          console.info(`${logPrefix} backend-complete-auth`, {
+            userId: user.id,
+            matchId,
+            tournamentId: match.event.tournament.id,
+            organizationId: match.event.tournament.organizationId,
+            scorerId: match.scorer,
+            isScorer,
+            isOrgMember: Boolean(member),
+            isManager,
+          });
+
+          if (!isScorer && !member && !isManager) {
             return sendResponse({
               success: false,
               message: "You are not authorized to complete this match",
@@ -1565,6 +1641,15 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
 
           const loserId =
             body.winnerId === match.teamA ? match.teamB : match.teamA;
+
+          console.info(`${logPrefix} backend-complete-resolution`, {
+            matchId,
+            winnerId: body.winnerId,
+            loserId,
+            teamA: match.teamA,
+            teamB: match.teamB,
+            roundNumber: match.roundNumber,
+          });
 
           await db.transaction(async (tx: any) => {
             // 1. Update match state and winner
@@ -1612,7 +1697,20 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   ),
                 );
 
-              if (totalMatchesInRound.length === 1) {
+              const advancingTeamIds = uniqueIds(
+                totalMatchesInRound.map((roundMatch: any) =>
+                  roundMatch.id === matchId
+                    ? body.winnerId
+                    : roundMatch.winnerId,
+                ),
+              );
+
+              if (advancingTeamIds.length < 2) {
+                console.info(`${logPrefix} backend-complete-event-completed`, {
+                  eventId: match.event!.id,
+                  matchId,
+                  advancingTeamIds,
+                });
                 await tx
                   .update(eventTable)
                   .set({
@@ -1620,6 +1718,13 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
                   })
                   .where(eq(eventTable.id, match.event!.id));
               } else {
+                console.info(`${logPrefix} backend-complete-round-over`, {
+                  eventId: match.event!.id,
+                  matchId,
+                  nextRound: match.roundNumber + 1,
+                  totalMatchesInRound: totalMatchesInRound.length,
+                  advancingTeamIds,
+                });
                 await tx
                   .update(eventTable)
                   .set({
@@ -1647,15 +1752,30 @@ export const matchRoutes = protectedApi.group("/match", (app) =>
             JSON.stringify(broadcastData),
           );
 
+          console.info(`${logPrefix} backend-complete-success`, {
+            userId: user.id,
+            matchId,
+            winnerId: body.winnerId,
+          });
+
           return sendResponse({
             success: true,
             message: "Match completed and states updated successfully",
           });
         } catch (error) {
-          console.error("[match/complete] failed", error);
+          console.error(`${logPrefix} backend-complete-failed`, {
+            userId: user.id,
+            matchId,
+            body,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          });
           return sendResponse({
             success: false,
-            message: "Failed to complete match",
+            message:
+              error instanceof Error
+                ? `Failed to complete match: ${error.message}`
+                : "Failed to complete match",
           });
         }
       },

@@ -33,6 +33,13 @@ import { sendResponse } from "@/utils/response";
 import { canViewEvent, isTournamentManager } from "@/utils/access";
 import { t } from "elysia";
 
+const scheduleFinalizableEventStates = [
+  "created",
+  "registration_closed",
+  "participants_finalized",
+  "round_over",
+] as const;
+
 export const eventRoutes = protectedApi.group("/event", (app) =>
   app
     .get(
@@ -1304,7 +1311,17 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
     .post(
       "/finalize-schedule/:eventId",
       async ({ db, user, body, params: { eventId } }) => {
+        const logPrefix = "[FixturePublishDebug]";
         try {
+          console.info(`${logPrefix} backend-finalize-start`, {
+            eventId,
+            userId: user.id,
+            requestedMatchCount: Array.isArray(body.matches)
+              ? body.matches.length
+              : 0,
+            requestedMatches: body.matches,
+          });
+
           const event = await db.query.eventTable.findFirst({
             where: ((table: any, { eq }: any) => eq(table.id, eventId)) as any,
             with: {
@@ -1313,11 +1330,28 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
           });
 
           if (!event || !event.tournament) {
+            console.warn(`${logPrefix} backend-event-not-found`, {
+              eventId,
+              userId: user.id,
+              hasEvent: Boolean(event),
+              hasTournament: Boolean(event?.tournament),
+            });
             return sendResponse({
               success: false,
               message: "Event or related tournament not found",
             });
           }
+
+          console.info(`${logPrefix} backend-event-loaded`, {
+            eventId,
+            userId: user.id,
+            tournamentId: event.tournament.id,
+            organizationId: event.tournament.organizationId,
+            eventState: event.eventState,
+            activeRound: event.activeRound,
+            eventSetsPerMatch: event.setsPerMatch,
+            eventPointsPerSet: event.pointsPerSet,
+          });
 
           const member = await db.query.organizationMemberTable.findFirst({
             where: ((table: any, { eq, and }: any) =>
@@ -1327,6 +1361,11 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
               )) as any,
           });
           if (!member) {
+            console.warn(`${logPrefix} backend-member-missing`, {
+              eventId,
+              userId: user.id,
+              organizationId: event.tournament.organizationId,
+            });
             return sendResponse({
               success: false,
               message: "You are not eligible to finalize the schedule",
@@ -1335,33 +1374,65 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
 
           if (
             event.eventState &&
-            !["created", "registration_closed", "participants_finalized"].includes(
-              event.eventState,
-            )
+            !scheduleFinalizableEventStates.includes(event.eventState as any)
           ) {
+            console.warn(`${logPrefix} backend-state-blocked`, {
+              eventId,
+              userId: user.id,
+              eventState: event.eventState,
+              activeRound: event.activeRound,
+            });
             return sendResponse({
               success: true,
               message: "Schedule already finalized",
             });
           }
 
-          await db.transaction(async (tx) => {
+          const insertedMatchIds = await db.transaction(async (tx) => {
             const updatedEvents = await tx
               .update(eventTable)
               .set({ eventState: "scheduled" })
               .where(
                 and(
                   eq(eventTable.id, eventId),
-                  eq(eventTable.eventState, event.eventState),
+                  inArray(eventTable.eventState, [
+                    ...scheduleFinalizableEventStates,
+                  ]),
                 ),
               )
               .returning({ id: eventTable.id });
 
-            if (updatedEvents.length === 0) return;
+            console.info(`${logPrefix} backend-event-update-result`, {
+              eventId,
+              previousState: event.eventState,
+              updatedCount: updatedEvents.length,
+            });
+
+            if (updatedEvents.length === 0) {
+              console.warn(`${logPrefix} backend-event-update-skipped`, {
+                eventId,
+                expectedStates: scheduleFinalizableEventStates,
+                loadedState: event.eventState,
+              });
+              throw new Error(
+                `Schedule finalize skipped because event ${eventId} is no longer in a finalizable state`,
+              );
+            }
+
+            const createdIds: string[] = [];
 
             // Create matches
-            for (const match of body.matches) {
-              await tx.insert(matchTable).values({
+            for (const [index, match] of body.matches.entries()) {
+              console.info(`${logPrefix} backend-insert-match-start`, {
+                eventId,
+                index,
+                roundNumber: match.roundNumber,
+                teamA: match.teamA,
+                teamB: match.teamB,
+                startTime: match.startTime,
+              });
+
+              const insertedMatches = await tx.insert(matchTable).values({
                 eventId: eventId,
                 roundNumber: match.roundNumber,
                 teamA: match.teamA,
@@ -1372,18 +1443,69 @@ export const eventRoutes = protectedApi.group("/event", (app) =>
                 setsPerMatchId: match.setsPerMatch || event.setsPerMatch,
                 pointsPerSet: match.pointsPerSet || event.pointsPerSet,
                 sideSwitching: match.sideSwitching || "per_set",
+              }).returning({ id: matchTable.id });
+
+              console.info(`${logPrefix} backend-insert-match-success`, {
+                eventId,
+                index,
+                matchId: insertedMatches[0]?.id || null,
               });
+              if (insertedMatches[0]?.id) {
+                createdIds.push(insertedMatches[0].id);
+              }
             }
+
+            return createdIds;
+          });
+
+          if (insertedMatchIds.length !== body.matches.length) {
+            throw new Error(
+              `Schedule finalize inserted ${insertedMatchIds.length} of ${body.matches.length} matches`,
+            );
+          }
+
+          const [persistedEvent, persistedMatches] = await Promise.all([
+            db.query.eventTable.findFirst({
+              where: ((table: any, { eq }: any) =>
+                eq(table.id, eventId)) as any,
+            }),
+            db
+              .select({ id: matchTable.id })
+              .from(matchTable)
+              .where(eq(matchTable.eventId, eventId)),
+          ]);
+
+          console.info(`${logPrefix} backend-finalize-success`, {
+            eventId,
+            createdMatchCount: body.matches.length,
+            insertedMatchIds,
+            persistedEventState: persistedEvent?.eventState || null,
+            persistedMatchCount: persistedMatches.length,
           });
 
           return sendResponse({
             success: true,
             message: "Schedule finalized and matches created successfully",
+            data: {
+              eventId,
+              eventState: persistedEvent?.eventState || "scheduled",
+              createdMatchCount: insertedMatchIds.length,
+              insertedMatchIds,
+              persistedMatchCount: persistedMatches.length,
+            },
           });
-        } catch {
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          console.error(`${logPrefix} backend-finalize-failed`, {
+            eventId,
+            userId: user.id,
+            requestedMatches: body.matches,
+            error: errorMessage,
+          });
           return sendResponse({
             success: false,
-            message: "Failed to finalize schedule",
+            message: `Failed to finalize schedule: ${errorMessage}`,
           });
         }
       },

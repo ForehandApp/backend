@@ -8,6 +8,7 @@ import {
   organizationTable,
   eventInvitesTable,
   eventTable,
+  tournamentVolunteerTable,
   tournamentInvitesTable,
   tournamentTable,
   teamTable,
@@ -143,6 +144,7 @@ function formatLiveMatchForUser(match: any, userId: string) {
 
   return {
     id: match.id,
+    matchState: match.matchState,
     tournamentId: match.event!.tournament.id,
     tournamentName: match.event!.tournament.name,
     matchTitle: `${match.event!.name} · Match #${String(match.id).split("-")[0]}`,
@@ -250,60 +252,19 @@ async function getCurrentUserLiveMatch(db: any, user: any) {
 }
 
 async function getUserLiveFeed(db: any, user: any) {
-  const joinedTournamentRows = await db
-    .select({ tournamentId: eventTable.tournamentId })
-    .from(teamParticipantTable)
-    .innerJoin(teamTable, eq(teamParticipantTable.teamId, teamTable.id))
-    .innerJoin(eventTable, eq(teamTable.eventId, eventTable.id))
-    .where(eq(teamParticipantTable.userId, user.id));
-
-  const joinedTournamentIds = [
-    ...new Set(joinedTournamentRows.map((row: any) => row.tournamentId)),
-  ];
-
-  const scorerTournamentRows = await db
-    .select({ tournamentId: eventTable.tournamentId })
-    .from(matchTable)
-    .innerJoin(eventTable, eq(matchTable.eventId, eventTable.id))
-    .where(eq(matchTable.scorer, user.id));
-
-  const liveFeedTournamentIds = [
-    ...new Set([
-      ...joinedTournamentIds,
-      ...scorerTournamentRows.map((row: any) => row.tournamentId),
-    ]),
-  ];
-
-  if (liveFeedTournamentIds.length === 0) return [];
-
-  const joinedTournamentEvents = await db
-    .select({ eventId: eventTable.id })
-    .from(eventTable)
-    .where(inArray(eventTable.tournamentId, liveFeedTournamentIds));
-
-  const joinedTournamentEventIds = joinedTournamentEvents.map(
-    (row: any) => row.eventId,
-  );
-
-  if (joinedTournamentEventIds.length === 0) return [];
-
   const liveCandidateRows = await db
     .select({ id: matchTable.id })
     .from(matchTable)
-    .where(
-      and(
-        notInArray(matchTable.matchState, [
-          "completed",
-          "abandoned",
-          "walkover",
-        ]),
-        inArray(matchTable.eventId, joinedTournamentEventIds),
-        or(eq(matchTable.matchState, "in_progress"), hasLiveSetActivityCondition()),
-      ),
-    )
+    .where(eq(matchTable.matchState, "in_progress"))
     .orderBy(desc(matchTable.updatedAt));
 
   const liveCandidateIds = liveCandidateRows.map((row: any) => row.id);
+  console.info("[LiveMatchesDebug] user-live-feed-candidates", {
+    userId: user.id,
+    visibility: "all_authenticated_users",
+    liveCandidateCount: liveCandidateIds.length,
+  });
+
   if (liveCandidateIds.length === 0) return [];
 
   const liveMatches = await db.query.matchTable.findMany({
@@ -354,6 +315,20 @@ async function getUserLiveFeed(db: any, user: any) {
   });
 
   return Object.values(groupedData);
+}
+
+async function getUserLiveFeedDebug(db: any, user: any) {
+  const liveCandidateRows = await db
+    .select({ id: matchTable.id })
+    .from(matchTable)
+    .where(eq(matchTable.matchState, "in_progress"));
+
+  return {
+    userId: user.id,
+    visibility: "all_authenticated_users",
+    requiredMatchState: "in_progress",
+    liveCandidateCount: liveCandidateRows.length,
+  };
 }
 
 export const userRoutes = protectedApi.group("/user", (app) =>
@@ -702,15 +677,16 @@ export const userRoutes = protectedApi.group("/user", (app) =>
     })
     .get("/matches/live-summary", async ({ user, db }) => {
       try {
-        const [match, feed] = await Promise.all([
+        const [match, feed, debug] = await Promise.all([
           getCurrentUserLiveMatch(db, user),
           getUserLiveFeed(db, user),
+          getUserLiveFeedDebug(db, user),
         ]);
 
         return sendResponse({
           success: true,
           message: "Live summary fetched successfully",
-          data: { match, feed },
+          data: { match, feed, debug },
         });
       } catch {
         return sendResponse({
@@ -1087,9 +1063,7 @@ export const userRoutes = protectedApi.group("/user", (app) =>
           );
 
         const liveMatches = (liveMatchCandidates as any[]).filter(
-          (match: any) =>
-            match.matchState === "in_progress" ||
-            hasLiveSetActivity(match.sets || []),
+          (match: any) => match.matchState === "in_progress",
         );
 
         // 3. Group by tournament

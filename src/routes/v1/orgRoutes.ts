@@ -7,11 +7,25 @@ import {
   organizationMemberTable,
   organizationTable,
   orgTypesTable,
+  setTable,
   tournamentTable,
 } from "@/services/db/schema";
 import { sendResponse } from "@/utils/response";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, or, sql } from "drizzle-orm";
 import { t } from "elysia";
+
+function hasLiveSetActivityCondition() {
+  return sql`exists (
+    select 1
+    from ${setTable}
+    where ${setTable.matchId} = ${matchTable.id}
+      and (
+        ${setTable.setStatus} in ('in_progress', 'completed')
+        or ${setTable.teamAScore} > 0
+        or ${setTable.teamBScore} > 0
+      )
+  )`;
+}
 
 export const orgRoutes = protectedApi.group("/org", (app) =>
   app
@@ -336,19 +350,60 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
             });
           }
 
-          // 3. Fetch all in_progress matches for these tournaments
-          const liveMatches = await db.query.matchTable.findMany({
-            where: ((match: any, { eq, and, inArray }: any) =>
+          const tournamentEventRows = await db
+            .select({ id: eventTable.id })
+            .from(eventTable)
+            .where(inArray(eventTable.tournamentId, tournamentIds));
+          const eventIds = tournamentEventRows.map((event) => event.id);
+
+          if (eventIds.length === 0) {
+            return sendResponse({
+              success: true,
+              message: "No tournament events found for this organization",
+              data: [],
+            });
+          }
+
+          // 3. Fetch live matches for these tournaments. A match is live if it
+          // is explicitly in_progress or has scoring activity.
+          const liveCandidateRows = await db
+            .select({ id: matchTable.id })
+            .from(matchTable)
+            .where(
               and(
-                eq(match.matchState, "in_progress"),
-                inArray(
-                  match.eventId,
-                  db
-                    .select({ id: eventTable.id })
-                    .from(eventTable)
-                    .where(inArray(eventTable.tournamentId, tournamentIds)),
+                inArray(matchTable.eventId, eventIds),
+                notInArray(matchTable.matchState, [
+                  "completed",
+                  "abandoned",
+                  "walkover",
+                ]),
+                or(
+                  eq(matchTable.matchState, "in_progress"),
+                  hasLiveSetActivityCondition(),
                 ),
-              )) as any,
+              ),
+            )
+            .orderBy(desc(matchTable.updatedAt));
+          const liveCandidateIds = liveCandidateRows.map((row) => row.id);
+
+          console.info("[LiveMatchesDebug] org-live-candidates", {
+            orgId,
+            tournamentCount: tournamentIds.length,
+            eventCount: eventIds.length,
+            liveCandidateCount: liveCandidateIds.length,
+          });
+
+          if (liveCandidateIds.length === 0) {
+            return sendResponse({
+              success: true,
+              message: "No live matches found for this organization",
+              data: [],
+            });
+          }
+
+          const liveMatches = await db.query.matchTable.findMany({
+            where: ((match: any, { inArray }: any) =>
+              inArray(match.id, liveCandidateIds)) as any,
             with: {
               event: {
                 with: {
@@ -375,6 +430,7 @@ export const orgRoutes = protectedApi.group("/org", (app) =>
               },
               sets: true,
             },
+            orderBy: (table: any, { desc }: any) => [desc(table.updatedAt)],
           });
 
           // 4. Group by tournament
